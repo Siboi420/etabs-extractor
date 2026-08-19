@@ -1,0 +1,41 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Virtual environment (WSL editing venv; not part of the package) ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Test / tooling caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyright/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# --- Build / packaging artifacts ---
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# --- Local Windows COM helper (optional, user-supplied) ---
+windows_python.exe
+
+# --- Default extraction output (\`--output\` fallback) ---
+output/*
+!output/.gitkeep
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

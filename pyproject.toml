@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "etabs-extractor"
+version = "0.1.0"
+description = "Extract frame-element forces (P, V2, V3, T, M2, M3) from ETABS 22 via the COM API."
+readme = "etabs_extractor/README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "comtypes>=1.1.11",
+    "pandas>=1.5",
+    # plotting (lazy-imported in plots.py so the pure core stays importable
+    # even without matplotlib); >=3.9.3 matches pandas 3.0.5's plot extra.
+    "matplotlib>=3.9.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pyright",       # type checking (note: uses its own env; see README)
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["etabs_extractor*"]
+
+[tool.setuptools.package-data]
+etabs_extractor = ["README.md"]
+
+[tool.pyright]
+# Package root so first-party `etabs_extractor.*` imports resolve.
+include = ["etabs_extractor"]
+exclude = ["**/__pycache__"]
+

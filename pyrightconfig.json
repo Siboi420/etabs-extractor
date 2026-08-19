@@ -1,0 +1,9 @@
+{
+  "include": ["etabs_extractor"],
+  "exclude": ["**/__pycache__", "**/.venv/**"],
+  "venvPath": ".",
+  "venv": ".venv",
+  "reportMissingImports": true,
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "basic"
+}

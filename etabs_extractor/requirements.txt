@@ -1,0 +1,10 @@
+# etabs_extractor runtime dependencies
+# NOTE: comtypes only imports on Windows (it needs the Windows COM layer).
+# The package isolates it behind lazy imports so the pure-Python core
+# (config/models/io/results) works anywhere.
+comtypes>=1.1.11
+pandas>=1.5
+# plotting (imported lazily inside plots.py so the pure core stays importable
+# even where matplotlib is absent); >=3.9.3 matches pandas 3.0.5's plot extra
+matplotlib>=3.9.3
+
