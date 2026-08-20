@@ -22,6 +22,9 @@ dev = [
     "pyright",       # type checking (note: uses its own env; see README)
 ]
 
+[project.scripts]
+etabs-extractor-gui = "etabs_extractor.gui:run_gui"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["etabs_extractor*"]

@@ -47,11 +47,22 @@ etabs_extractor/
   plots.py        # matplotlib plan-view plotting of base reactions (lazy mpl)   [pure]
   cli.py          # argparse CLI entry point (--extract frame|base, --plot, --plot-csv)
   __main__.py     # enables `python -m etabs_extractor`
+  gui/            # tkinter GUI (base extraction + plotting) — lazy tk/mpl/COM
+    __init__.py   # run_gui() entry
+    __main__.py   # enables `python -m etabs_extractor.gui`
+    state.py      # GuiSettings dataclass + parse helpers          [pure]
+    service.py    # settings -> library call mapping + do_extract/load_from_csv/check_active_model  [pure-ish]
+    runner.py     # background thread + queue wrapper              [pure-ish]
+    widgets/
+      fields.py, plot_settings.py, preview.py   # tk widgets, lazy mpl
+    app.py        # EtabsExtractorApp(tk.Tk) view layer
   requirements.txt
   README.md
-  tests/test_dry_run.py   # FakeSapModel stub, no COM
+  tests/test_dry_run.py       # FakeSapModel stub, no COM
+  tests/test_plot_settings.py # GUI pure-layer + figure-builder tests, no display/COM
 run_etabs.sh      # WSL->Windows launcher (runs pkg under Windows Python)
-pyproject.toml    # setuptools; package is `etabs_extractor*`
+run_gui.sh        # WSL->Windows launcher for the GUI
+pyproject.toml    # setuptools; package is `etabs_extractor*`; [project.scripts] etabs-extractor-gui
 pyrightconfig.json
 .venv/            # WSL venv for editing/testing only (NO COM)
 ```
@@ -128,7 +139,8 @@ CLI/API -> results.extract_base_reactions()
                              (one PNG per load) into the output dir after extraction
 --plot-csv <path>            standalone: read a base CSV and plot it (no COM/model; WSL-ok)
 --plot-format <fmt>          image format for --plot/--plot-csv (default png; e.g. pdf, svg)
---units <unit>               display unit system: model (N, N·mm, mm) or kN-m (kN, kN·m, m)
+--units <unit>               coordinate display unit: model (kN, kN·m, mm) or kN-m (kN, kN·m, m;
+                             forces/moments already exported kN/kN·m, only coords mm→m differ)
 --tag <name>                 append `_<name>` to EVERY CSV and plot filename (sanitized suffix;
                              absence/empty/whitespace = no suffix)
 ```
@@ -182,6 +194,21 @@ CLI/API -> results.extract_base_reactions()
    `models.py`). New plot entry points / components go in `plots.py`;
    document any change in both docs.
 
+10. **The GUI is a thin view with lazy deps.** The `gui/` package adds no
+    COM/matplotlib/tk at *module* import time — `tkinter` is imported inside
+    `app.py` methods (the module imports fine with no display), matplotlib is
+    imported lazily in `preview.py` / `plots.py`, and COM is only reached via
+    the existing `connection.py`/`results.py`/`plots.py` layers through
+    `service.py`. All real work stays in those layers; the GUI is pure view +
+    orchestration. `state.py` and `service.py` are importable headlessly and
+    unit-tested in `tests/test_plot_settings.py`. **Keep the background
+    runner**: extraction runs on a `threading.Thread` and posts `(kind,
+    payload)` queue messages so the Tk main thread stays responsive; COM is
+    initialised in the worker thread (comtypes `CoInitialize()` before the job,
+    `CoUninitialize()` after — required on Windows for COM calls off the main
+    thread; a no-op on non-Windows). Don't hoist top-level `import
+    matplotlib` or `import tkinter` into the package modules.
+
 ---
 
 ## The `run_etabs.sh` launcher (how live runs work from WSL)
@@ -210,23 +237,31 @@ cd ~/Projects/Structural\ Works/etabs_extractor
 
 ---
 
-## Known issue: the WSL venv console-scripts are stale
+## Known issue (FIXED): the WSL venv console-scripts were stale
 
 The `.venv/` was moved after creation, so `.venv/bin/pip` and
-`.venv/bin/pyright` have broken shebangs (they point at the old
-`/home/siboi/Projects/Structural Works/.venv`). **Use `python -m pip` /
-`python -m pyright`** instead. A full venv rebuild would fix them, but the
-workaround works and avoids reinstalling deps.
+`.venv/bin/pyright` had broken shebangs (pointing at the old
+`/home/siboi/Projects/Structural Works/.venv`). These were repaired by
+rewriting the `'''exec' "..."` line in each wrapper to point at the current
+`.venv` (so `.venv/bin/pyright` and `.venv/bin/pip` now work again). A full
+venv rebuild would also have fixed them; the in-place fix avoids reinstalling
+deps. If you ever move `.venv` again, re-apply the same shebang fix (or
+rebuild) — nothing else depends on it beyond those two console wrappers.
 
 ---
 
 ## How to check your work
 
-- **Compile:** `python -m py_compile etabs_extractor/*.py etabs_extractor/tests/*.py`
+- **Compile:** `python -m py_compile etabs_extractor/*.py etabs_extractor/gui/*.py etabs_extractor/gui/widgets/*.py etabs_extractor/tests/*.py`
 - **Type:** `python -m pyright etabs_extractor/`  (keep 0 errors)
 - **Tests:** `MPLBACKEND=Agg python etabs_extractor/tests/test_dry_run.py` → expect `PASSED`
   (uses the non-interactive Agg backend; covers frame + base + plan plotting, plus
   tagged/untagged filenames, split min/max envelopes, point-number labels)
+- **GUI pure-layer + figure-builder tests:**
+  `MPLBACKEND=Agg python etabs_extractor/tests/test_plot_settings.py` → expect `PASSED`
+  (headless, no display, no comtypes; covers `build_base_reactions_figure` fixed/dynamic
+  size + no-points->None, `plot_base_reactions` dpi/figsize/fontsize threading, and the
+  `gui.service` settings->args mapping + `gui.state` parsing).
 - **Plot smoke (no COM, WSL):** `python -m etabs_extractor --plot-csv <dir>/all_base_reactions.csv`
   → expect a `base_<load>_plan.png` next to the CSV for each load. With
   `--tag KM13` the files become `base_<load>_plan_KM13.png`.
@@ -277,6 +312,20 @@ The architecture is designed to make this additive. The pattern:
 - CLI `--extract frame|base` + `--points` (name filter) + `--elevation`
   (single-`z` filter); `__init__.py` re-exports the new pure symbols; tests
   extended with `_FakePointObj` / `_FakeJointReact`.
+- **Base-reaction export units are kN / kN·m** (always-on, no opt-out):
+  `_read_point_reactions()` (`results.py`) divides source **N** forces by
+  `BASE_FORCE_SCALE = 1000.0` (→ kN) and source **N·mm** moments by
+  `BASE_MOMENT_SCALE = 1e6` (→ kN·m) at record construction, so the
+  record list, the returned DataFrame, and every base CSV all carry
+  converted values. Coordinates `x`/`y`/`z` are **not** converted and stay
+  in model length units (mm). The frame-force path is unaffected (still
+  N / N·mm). This is the single source of truth for both DataFrame and CSV
+  outputs.
+
+  Note on ordering: `--only-loaded` runs **after** conversion, so
+  `_is_null_reaction()` compares already-converted kN/kN·m values. That is
+  still correct for genuinely-zero supports (0 in any unit remains 0), so
+  the filter behavior is unchanged.
 
 The `--elevation` filter compares each point's `z` against the requested
 value with a small tolerance (`_z_match`, `tol=1.0` length units) before
@@ -288,6 +337,76 @@ every other joint entirely. It applies after the `--points` name filter.
 actually carry load — e.g. with envelope combos `ASD Max`/`LRFD Max` at
 `z=-16000` this yields the 100 loaded points that match the reference
 `KM13 Chamber 3.0.xlsx` 1-to-1.
+
+### Completed: interactive GUI + plot-appearance params
+
+A **tkinter GUI** was added (`etabs_extractor/gui/`) covering **base
+reaction extraction + plotting only** (per scope). It is a thin view over
+`results`/`plots`/`connection`.
+
+Plot-appearance args were added to the plotting entry points (backward
+compatible, defaults unchanged):
+
+- `dynamic_size: bool = True` — True uses ``_dynamic_figsize`` (figure
+  follows data extent); False uses the fixed ``figsize`` in inches.
+- `figsize: tuple[float, float] | None = None` — fixed size (default
+  ``(10, 8)``) when ``dynamic_size=False``.
+- `dpi: int = 800` — save resolution (replaces the hardcoded ``800`` in
+  ``savefig``).
+- `label_fontsize` — already existed (default ``2.4``).
+- Threaded through `plot_base_reactions`, `plot_base_reactions_from_csv`,
+  and the new `build_base_reactions_figure`.
+
+`build_base_reactions_figure(df, load_name, *, components, title, units,
+label_fontsize, dynamic_size, figsize) -> Figure | None` is a new **public**
+reusable figure builder: it draws one plan-view figure (scatter +
+annotations + title/axes) **without saving**, and returns ``None`` when a
+load has no plottable points. `_plot_one` now calls it then `savefig(...
+, dpi=dpi)` and closes. The GUI preview renders it into a `PlotPreviewFrame`
+canvas inside a **separate pop-up window** (`PlotPreviewWindow`, a
+`tk.Toplevel`) opened manually via the `Plot preview` button — not embedded
+in the main window.
+
+New COM touchpoint (quarantined in `connection.py`):
+`EtabsSession.get_model_filename(include_path: bool = True) -> str` — calls
+``SapModel.GetModelFilename(bool)`` (a **cSapModel** method on the model
+object, **not** the `File` interface; calling it on `File` fails at runtime),
+null-safe-coerces the comtypes return (str or list) to `str`, raises
+`EtabsConnectionError` on failure.  Used by the GUI's "Check active model"
+button.  The dry-run fake mirrors this real contract (`GetModelFilename` on
+on the fake `SapModel`, returning a plain string).
+
+GUI layout/behaviour (full detail in `service.py` / `app.py`):
+
+- **Model row**: file entry + Browse (`.EDB`/`.et`) + "Check active model"
+  (attaches to ETABS, backfills via `get_model_filename`).
+- **Destination row**: dir entry + Browse (defaults from `ETABS_OUTPUT`),
+  **Tag row** (sanitized like `io._sanitize_filename`).
+- **Combo field** (free text, comma-separated; empty = all model combos),
+  optional `elevation`, `only_loaded`, `run_analysis`, `attach` checkboxes.
+  Note: the plot preview renders one marker per distinct plan (x/y) point
+  returned by the extraction — envelope Max/Min steps collapse to one
+  governing marker per point (no duplication). But all-zero (non-load-bearing)
+  base joints are still plotted unless **only_loaded** is checked; for a clean
+  plan use `elevation` + `only_loaded`.
+- **Plot settings frame**: `dynamic_size` checkbox, width/height (disabled
+  when dynamic), dpi (default 800), label font size (default 2.4), units
+  (`model`/`kN-m`), format (`png`/`pdf`/`svg`). "Plot after extract".
+- **CSV section (no ETABS)**: CSV file + Browse + "Load preview".
+- **Plot preview pop-up (manual)**: a separate `tk.Toplevel`
+  (`PlotPreviewWindow` in `gui/widgets/preview.py`) hosts the load dropdown
+  - embedded `PlotPreviewFrame` canvas + `Preview` / `Save preview image`
+  buttons. Opened only via the **Plot preview** button in the main window —
+  never auto-popped after Extract / Load-preview. It builds figures through
+  `build_base_reactions_figure` (via `app._build_preview_figure`) and saves
+  at the chosen dpi/format. Closing it leaves the main window alive.
+- **Actions**: a **single** `Extract` button in the bottom bar + `Quit`.
+  Extract / Load preview run in a background thread; progress bar + log
+  line.
+
+Launcher: `./run_gui.sh` (mirrors `run_etabs.sh`) → Windows Python
+`python -m etabs_extractor.gui`. Installable console script:
+`etabs-extractor-gui` via `[project.scripts]` in `pyproject.toml`.
 
 ### Completed: plan-view plotting of base reactions
 
@@ -302,9 +421,11 @@ actually carry load — e.g. with envelope combos `ASD Max`/`LRFD Max` at
 - Component/unit maps `COMPONENT_COLUMNS` / `COMPONENT_UNITS` are module-level
   and extensible for future components (e.g. adding `Mx`/`M1` back).
 - Unit systems live in the `UNITS` dict (keys `"model"` and `"kN-m"`, plus
-  `DEFAULT_UNITS == "model"`): `kN-m` converts forces N→kN (÷1000), moments
-  N·mm→kN·m (÷1e6), coordinates mm→m (÷1000); labels, axes, and the shared-`z`
-  title all reflect the chosen unit. Add a new key to `UNITS` to extend.
+  `DEFAULT_UNITS == "model"`). Base reactions are already exported in
+  kN / kN·m, so `force_scale`/`moment_scale` are identity (1.0) in both
+  systems; only `length_scale` differs — `model` keeps coordinates in mm,
+  `kN-m` converts them mm→m (÷1000). Labels, axes, and the shared-`z` title
+  all reflect the chosen unit. Add a new key to `UNITS` to extend.
 - Points with `NaN` x/y are skipped (logged at debug) — never crash; scale
   reads go through the null-safe `_scale` helper (mirrors `_f`).
 - **Point-number label:** `_aggregate_maxabs` preserves the `point` name
@@ -363,14 +484,24 @@ actually carry load — e.g. with envelope combos `ASD Max`/`LRFD Max` at
   `--plot-csv` path, which runs in WSL without ETABS).
 - Windows interpreter (COM-capable, auto-discovered by `run_etabs.sh`):
   `/mnt/c/Users/user/AppData/Local/Python/...` — has `comtypes 1.4.16`,
-  `pandas 3.0.5`. For live `--plot` (plot right after a Windows extraction)
-  it also needs `matplotlib` installed.
+  `pandas 3.0.5`, and (now) `matplotlib 3.11.1` (installed 2025-08; needed
+  for the GUI's live preview canvas and for `--plot` right after a Windows
+  extraction — an earlier failure was exactly ``No module named
+  'matplotlib'`` on the Windows interpreter).
 - Reference model live in ETABS (example): `D:\PROJECTS\...\Daan Mogot\13\ETABS\3.0\KM 13 3.0.EDB`
   (202 frames, **497 points**, 81 combos, 18 cases). Verified live: `--extract base`
   combos `ASD 1`+`LRFD 1` → 994 reaction rows (populated x/y/z; real
   sub-grade reactions at `z=-16000`, zeros at elevated unrestrained joints).
-  Also verified live: `--extract base --combos "ASD Max" "LRFD Max"
+    Also verified live: `--extract base --combos "ASD Max" "LRFD Max"
   --elevation -16000 --only-loaded` → 400 rows (100 loaded points × 2 combos ×
-  2 envelope steps Max/Min), then `--plot-csv ... --units kN-m` renders
-  `base_ASD_Max_plan.png` / `base_LRFD_Max_plan.png` with N→kN (÷1000),
-  N·mm→kN·m (÷1e6), mm→m (÷1000) display.
+  2 envelope steps Max/Min). **Base reactions are exported in kN/kN·m**
+  (now written directly to the CSVs), then `--plot-csv ... --units kN-m`
+  additionally renders `base_ASD_Max_plan.png` / `base_LRFD_Max_plan.png`
+  with mm→m (÷1000) coordinate display — forces/moments already carry
+  converted kN/kN·m values from extraction.
+
+  For the GUI launcher, the Windows Python additionally needs `matplotlib`
+  installed for the live in-GUI preview (done: installed on the Windows
+  interpreter).  If the preview ever shows `No module named 'matplotlib'`,
+  run ``<windows-python> -m pip install matplotlib`` (or relaunch via
+  `run_gui.sh`, whose Windows Python should now have it).

@@ -197,6 +197,39 @@ class EtabsSession:
         if ret not in (0, None):
             raise EtabsConnectionError(f"Analyze.RunAnalysis returned {ret!r}")
 
+    def get_model_filename(self, include_path: bool = True) -> str:
+        """Return the path of the currently-open model.
+
+        ``GetModelFilename(bool include_path=True) -> string`` is a **cSapModel**
+        method — called on the ``SapModel`` object directly, NOT on the ``File``
+        interface.  (The ``File`` object wraps the file-edit operations and has
+        no ``GetModelFilename``; calling it there fails at runtime.)
+
+        ``include_path`` controls whether the full path or only the file name is
+        returned.  The comtypes return may be a plain string, ``None``, or a
+        ``[value, retcode]`` sequence; all are coerced null-safely to ``str``.
+
+        :param include_path: when True (default) return the full path (e.g.
+            ``D:\\...\\model.EDB``), else only the file name (e.g. ``model.EDB``).
+        :returns: the model filename string (possibly empty).
+        :raises EtabsConnectionError: on any COM failure.
+        """
+        try:
+            out = self.sap_model.GetModelFilename(include_path)
+        except Exception as exc:  # noqa: BLE001
+            raise EtabsConnectionError(
+                f"SapModel.GetModelFilename failed: {exc}"
+            ) from exc
+        if isinstance(out, (list, tuple)) and out:
+            # comtypes may wrap in [value, retcode]; take the first string-ish.
+            for elem in out:
+                if elem is not None and str(elem).strip():
+                    return str(elem).strip()
+            return ""
+        if out is None:
+            return ""
+        return str(out).strip()
+
     # -- Introspection used by the extractor ---------------------------------
 
     def get_frame_names(self) -> list[str]:

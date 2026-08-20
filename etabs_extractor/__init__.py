@@ -41,6 +41,7 @@ from .plots import (
     DEFAULT_COMPONENTS,
     DEFAULT_UNITS,
     UNITS,
+    build_base_reactions_figure,
     plot_base_reactions,
     plot_base_reactions_from_csv,
 )
@@ -72,6 +73,7 @@ __all__ = [
     "UNITS",
     "plot_base_reactions",
     "plot_base_reactions_from_csv",
+    "build_base_reactions_figure",
     "extract_forces",
     "extract_base_reactions",
     "list_available",

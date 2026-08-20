@@ -133,8 +133,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="model",
         metavar="UNIT",
         choices=["model", "kN-m"],
-        help="Unit system for plot display: 'model' (default; N, N·mm, mm) "
-        "or 'kN-m' (forces N→kN, moments N·mm→kN·m, coordinates mm→m). "
+        help="Unit system for plot display: 'model' (default; kN, kN·m, mm) "
+        "or 'kN-m' (kN, kN·m, m; coordinates mm→m). Base reactions are "
+        "already exported in kN/kN·m, so forces/moments are not rescaled; "
+        "only the coordinate length unit differs. "
         "Applies to --plot and --plot-csv.",
     )
     parser.add_argument(

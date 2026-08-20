@@ -206,6 +206,9 @@ class _FakePointObj:
 
 
 class _FakeFile:
+    def __init__(self, model_filename: str = "D:\\Models\\synthetic_model.EDB") -> None:
+        self.model_filename = model_filename
+
     def OpenFile(self, path):
         return 0
 
@@ -219,14 +222,28 @@ class _FakeSapModel:
     """Full fake exposing the EtabsSession surface used by extract_forces."""
 
     def __init__(self, *, frames, sections, combos, cases, data_by_frame,
-                 point_names, point_coords):
-        self.File = _FakeFile()
+                 point_names, point_coords,
+                 model_filename: str = "D:\\Models\\synthetic_model.EDB"):
+        self.File = _FakeFile(model_filename=model_filename)
         self.Analyze = _FakeAnalyze()
         self.FrameObj = _FakeFrameObj(frames, sections)
         self.RespCombo = _FakeRespCombo(combos)
         self.LoadCases = _FakeLoadCases(cases)
         self.PointObj = _FakePointObj(point_names, point_coords)
         self.Results = _FakeResults(data_by_frame, combos)
+        self.model_filename = model_filename
+
+    def GetModelFilename(self, include_path=True):
+        """Mirror the real ``cSapModel.GetModelFilename`` method (on the model
+        object, not the File interface).
+
+        ``GetModelFilename(bool include_path) -> string`` is a cSapModel method
+        in the CSI OAPI.  The comtypes return shape is a plain ``str`` (or a
+        ``[value, retcode]`` sequence), so the fake returns a plain string for
+        the full path and a bare name when ``include_path`` is False."""
+        if not include_path:
+            return self.model_filename.split("\\")[-1]
+        return self.model_filename
 
 
 class _FakeSession(_extractor_connection.EtabsSession):
@@ -536,15 +553,16 @@ def run():
                                           [f"{c}_max" for c in BASE_FORCE_COLS]), \
             list(benv_max.columns)
         # For a known synthetic point/load verify min/max semantics.  Point 1
-        # with ASD 1 has (F1,F2,F3)=(10,2,120) and LRFD 1 has (15,3,180); the
-        # combined 1/load_name group min/max per component must match.
+        # with ASD 1 has (F1,F2,F3)=(10,2,120) and LRFD 1 has (15,3,180)
+        # (source N), so after conversion to kN the combined 1/load_name
+        # group min/max per component must match the ÷1000 values.
         pt1_asd = benv_min[(benv_min["point"].astype(str) == "1") &
                            (benv_min["load_name"] == "ASD 1")]
         assert len(pt1_asd) == 1, pt1_asd
-        assert pt1_asd.iloc[0]["F3_min"] == 120.0
+        assert pt1_asd.iloc[0]["F3_min"] == 0.120
         pt1_all = benv_max[benv_max["point"].astype(str) == "1"]
-        # Across ASD 1 (F3=120) and LRFD 1 (F3=180), max F3 is 180.
-        assert pt1_all["F3_max"].max() >= 180.0
+        # Across ASD 1 (F3=120) and LRFD 1 (F3=180): max F3 in kN is 0.180.
+        assert pt1_all["F3_max"].max() >= 0.180
 
         # Tagged base run: every base CSV and figure filename carries the suffix.
         tagged_dir = out / "tagged"
@@ -645,11 +663,16 @@ def run():
         # Default components are exactly Fz, M2, M3 (Fx/Fy omitted).
         assert DEFAULT_COMPONENTS == ("Fz", "M2", "M3"), DEFAULT_COMPONENTS
 
-        # Unit conversion: kN-m display scale factors are as documented.
+        # Unit conversion: base reactions are exported in kN/kN·m, so in BOTH
+        # unit systems force/moment scale is identity (1.0); only the
+        # coordinate length_scale differs (mm vs m).
         from etabs_extractor.plots import UNITS
-        assert UNITS["kN-m"]["force_scale"] == 1000.0
-        assert UNITS["kN-m"]["moment_scale"] == 1e6
+        assert UNITS["kN-m"]["force_scale"] == 1.0
+        assert UNITS["kN-m"]["moment_scale"] == 1.0
         assert UNITS["kN-m"]["length_scale"] == 1000.0
+        assert UNITS["model"]["force_scale"] == 1.0
+        assert UNITS["model"]["moment_scale"] == 1.0
+        assert UNITS["model"]["length_scale"] == 1.0
 
         # Plot with kN/m units; still one figure per load, files non-empty.
         plot_paths_knm = plot_base_reactions(bdf, out, units="kN-m")
@@ -711,17 +734,19 @@ def run():
         # Envelope-load aggregation: a point with two rows (Max/Min) must
         # collapse to one value per component — the largest absolute value,
         # sign preserved — and the point name must survive aggregation.
+        # Values are unit-agnostic here (aggregation is pure max-abs); they
+        # use kN-scale magnitudes to stay consistent with the new export units.
         from etabs_extractor.plots import _aggregate_maxabs
         env_df = pd.DataFrame([
-            {"point": "7", "x": 100.0, "y": 200.0, "F1": 1.0, "F2": 2.0, "F3": 615759.9,
+            {"point": "7", "x": 100.0, "y": 200.0, "F1": 1.0, "F2": 2.0, "F3": 615.7599,
              "M1": 0.0, "M2": 10.0, "M3": 20.0, "load_name": "ENV"},
-            {"point": "7", "x": 100.0, "y": 200.0, "F1": 3.0, "F2": 4.0, "F3": -304458.0,
+            {"point": "7", "x": 100.0, "y": 200.0, "F1": 3.0, "F2": 4.0, "F3": -304.458,
              "M1": 0.0, "M2": -15.0, "M3": 25.0, "load_name": "ENV"},
         ])
         agg = _aggregate_maxabs(env_df, ("Fz", "M2", "M3"))
         assert len(agg) == 1, f"expected 1 aggregated row, got {len(agg)}"
         first = agg.iloc[0]
-        assert first["F3"] == 615759.9, first["F3"]
+        assert first["F3"] == 615.7599, first["F3"]
         assert first["M2"] == -15.0, first["M2"]
         assert first["M3"] == 25.0, first["M3"]
         # Point name preserved across the (x,y) group merge.
@@ -733,6 +758,12 @@ def run():
         label = _format_label(agg.iloc[0], ("Fz", "M2", "M3"), UNITS["model"])
         label_lines = label.split("\n")
         assert label_lines[0] == "7", label_lines
+        # Units: base reactions are exported in kN/kN·m, so labels under BOTH
+        # unit systems carry "kN" / "kN·m" (model => coords mm).
+        for system in ("model", "kN-m"):
+            lbl = _format_label(agg.iloc[0], ("Fz", "M2", "M3"), UNITS[system])
+            assert "kN" in lbl, (system, lbl)
+            assert "kN·m" in lbl, (system, lbl)
         # A null point name is omitted defensively (no blank first line).
         null_label = _format_label(
             {"point": None, "F3": 1.0, "M2": 0.0, "M3": 0.0},

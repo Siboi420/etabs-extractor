@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Sequence
+from typing import TYPE_CHECKING, Any, Sequence
+
+if TYPE_CHECKING:
+    from matplotlib.figure import Figure
 
 from .io import _append_tag, _sanitize_filename
 
@@ -42,39 +45,42 @@ COMPONENT_COLUMNS: dict[str, str] = {
     "M3": "M3",
 }
 
-# Friendly component name -> display unit (model units; no conversion).
+# Friendly component name -> display unit (base reactions are exported in
+# kN / kN·m, so these are the default display units; no further conversion).
 COMPONENT_UNITS: dict[str, str] = {
-    "Fx": "N",
-    "Fy": "N",
-    "Fz": "N",
-    "M1": "N·mm",
-    "M2": "N·mm",
-    "M3": "N·mm",
+    "Fx": "kN",
+    "Fy": "kN",
+    "Fz": "kN",
+    "M1": "kN·m",
+    "M2": "kN·m",
+    "M3": "kN·m",
 }
 
 # Supported unit systems.  Each carries the display units and the divisor used
-# to convert the model's native values (N, N·mm, mm) into the display units.
-#   force_scale:  N        -> target force unit   (divisor)
-#   moment_scale: N·mm     -> target moment unit  (divisor)
-#   length_scale: mm       -> target length unit  (divisor)
+# to convert the already-exported base-reaction values (kN for forces, kN·m
+# for moments, mm for coordinates) into the display units.
+#   force_scale:  kN     -> target force unit   (divisor)
+#   moment_scale: kN·m   -> target moment unit  (divisor)
+#   length_scale: mm     -> target length unit  (divisor)
+# Force/moment scaling is identity (1.0) in both systems — the values are
+# already exported as kN / kN·m — so only length_scale (mm -> m) differs.
 UNITS: dict[str, dict[str, object]] = {
-    # Model units (default): no conversion.
+    # Exported units (default): kN / kN·m / mm, no further conversion.
     "model": {
-        "force": "N",
-        "moment": "N·mm",
+        "force": "kN",
+        "moment": "kN·m",
         "length": "mm",
         "force_scale": 1.0,
         "moment_scale": 1.0,
         "length_scale": 1.0,
     },
-    # kN / m: forces N->kN (÷1000), moments N·mm->kN·m (÷1e6),
-    # lengths mm->m (÷1000).
+    # kN / m: forces/moments already kN/kN·m (unchanged), coords mm->m (÷1000).
     "kN-m": {
         "force": "kN",
         "moment": "kN·m",
         "length": "m",
-        "force_scale": 1000.0,
-        "moment_scale": 1e6,
+        "force_scale": 1.0,
+        "moment_scale": 1.0,
         "length_scale": 1000.0,
     },
 }
@@ -104,6 +110,9 @@ def plot_base_reactions(
     title: str | None = None,
     units: str = DEFAULT_UNITS,
     label_fontsize: float = 2.4,
+    dynamic_size: bool = True,
+    figsize: tuple[float, float] | None = None,
+    dpi: int = 800,
     tag: str | None = None,
 ) -> list[Path]:
     """Render plan-view (x-y) figures of base reactions and save them.
@@ -119,12 +128,21 @@ def plot_base_reactions(
     :param fmt: image format (e.g. ``png``, ``pdf``, ``svg``).
     :param title: override the figure title.  When ``None``, the title is the
         ``load_name`` (plus ``z = <value> mm`` when every point shares one ``z``).
-    :param units: unit system for display — ``"model"`` (default; N, N·mm, mm)
-        or ``"kN-m"`` (forces N\u2192kN, moments N·mm\u2192kN·m, coords mm\u2192m).
-        Keys must exist in :data:`UNITS`.
+    :param units: unit system for display — ``"model"`` (default; kN, kN·m, mm)
+        or ``"kN-m"`` (kN, kN·m, m — coordinates mm→m).  Base reactions are
+        already exported in kN/kN·m, so forces/moments are not rescaled; only
+        the coordinate length unit differs between the two systems.  Keys must
+        exist in :data:`UNITS`.
     :param label_fontsize: font size (points) for each point's annotation
-        label.  Defaults to ``2.0`` (about 0.2\u00d7 the previous "small" ~10pt
+        label.  Defaults to ``2.4`` (about 0.2\u00d7 the previous "small" ~10pt
         labels) for a compact figure.
+    :param dynamic_size: when True (default) the figure size follows the
+        plotted data's extent (see :func:`_dynamic_figsize`); when False the
+        fixed ``figsize`` (in inches) is used instead.
+    :param figsize: fixed figure size in inches, used only when
+        ``dynamic_size=False`` (default ``(10, 8)``).
+    :param dpi: save resolution in dots-per-inch (passed to ``savefig``;
+        default ``800``).
     :param tag: optional suffix appended to each figure filename stem (e.g.
         ``KM13`` -> ``base_<load>_plan_KM13.png``).  Absent/empty = no suffix.
     :returns: the list of written :class:`Path` objects.
@@ -144,14 +162,16 @@ def plot_base_reactions(
         single = df[df["load_name"] == load_name]
         written.append(
             _plot_one(single, out, load_name, comps, fmt=fmt, title=title,
-                      units_def=units_def, label_fontsize=label_fontsize, tag=tag)
+                      units_def=units_def, label_fontsize=label_fontsize,
+                      dynamic_size=dynamic_size, figsize=figsize, dpi=dpi, tag=tag)
         )
         return written
 
     for name, grp in df.groupby("load_name", sort=True, dropna=False):
         written.append(
             _plot_one(grp, out, str(name), comps, fmt=fmt, title=title,
-                      units_def=units_def, label_fontsize=label_fontsize, tag=tag)
+                      units_def=units_def, label_fontsize=label_fontsize,
+                      dynamic_size=dynamic_size, figsize=figsize, dpi=dpi, tag=tag)
         )
     return written
 
@@ -164,6 +184,10 @@ def plot_base_reactions_from_csv(
     fmt: str = "png",
     title: str | None = None,
     units: str = DEFAULT_UNITS,
+    label_fontsize: float = 2.4,
+    dynamic_size: bool = True,
+    figsize: tuple[float, float] | None = None,
+    dpi: int = 800,
     tag: str | None = None,
 ) -> list[Path]:
     """Read a base-reaction CSV and plot it (no model / COM required).
@@ -185,7 +209,10 @@ def plot_base_reactions_from_csv(
 
     target = Path(output_dir) if output_dir is not None else Path(csv_path).parent
     return plot_base_reactions(df, target, components=comps, fmt=fmt,
-                               title=title, units=units, tag=tag)
+                               title=title, units=units,
+                               label_fontsize=label_fontsize,
+                               dynamic_size=dynamic_size, figsize=figsize,
+                               dpi=dpi, tag=tag)
 
 
 def _validate_components(comps: Sequence[str]) -> None:
@@ -214,6 +241,103 @@ def _validate_columns(df, comps: Sequence[str]) -> None:
         )
 
 
+def build_base_reactions_figure(
+    df,
+    load_name: str,
+    *,
+    components: Sequence[str] | None = None,
+    title: str | None = None,
+    units: str | dict = DEFAULT_UNITS,
+    label_fontsize: float = 2.4,
+    dynamic_size: bool = True,
+    figsize: tuple[float, float] | None = None,
+) -> "Figure | None":
+    """Build (but **do not** save) one plan-view figure for a single load.
+
+    This is the reusable drawing step shared by :func:`_plot_one` (which saves
+    the figure) and the GUI preview (which embeds the figure in a canvas).  It
+    draws the scatter, annotations, title and axes for ``df`` (which should
+    hold exactly one ``load_name``'s rows) into a fresh :mod:`matplotlib`
+    figure and returns it.  Returns ``None`` when there are no plottable
+    points (unresolved x/y) for this load.  The returned figure is **open**
+    and must be closed (``plt.close(fig)``) by the caller when done.
+
+    :param df: base-reaction DataFrame for a single load.
+    :param load_name: the load name used for the default title.
+    :param components: friendly component names to annotate (default
+        :data:`DEFAULT_COMPONENTS`).
+    :param title: override the figure title; ``None`` derives it from the load
+        name (plus a shared ``z`` when every point shares one).
+    :param units: unit system for display (``"model"`` or ``"kN-m"``).
+    :param label_fontsize: annotation font size (points).
+    :param dynamic_size: when True, size the figure from the data extent;
+        otherwise use the fixed ``figsize`` (inches).
+    :param figsize: fixed figure size in inches for ``dynamic_size=False``
+        (default ``(10, 8)``).
+    """
+    import matplotlib  # noqa: PLC0415
+    import matplotlib.pyplot as plt  # noqa: PLC0415
+
+    comps = tuple(components) if components is not None else DEFAULT_COMPONENTS
+    _validate_components(comps)
+    units_def = _resolve_units(units)
+
+    # Skip points with unresolved coordinates; never crash.  (x/y come from
+    # the DataFrame where unresolvable coords were kept as NaN.)
+    valid = df[df["x"].notna() & df["y"].notna()]
+    if len(valid) == 0:
+        logger.warning("No plottable points for load %r; skipping figure.", load_name)
+        return None
+
+    # One per-point label: for envelope loads a point may appear in several
+    # rows (e.g. Max/Min envelope steps).  Keep, per component, the row whose
+    # value has the largest absolute magnitude (sign preserved).
+    valid = _aggregate_maxabs(valid, comps)
+
+    len_scale = _scale(units_def, "length_scale")
+    len_unit = str(units_def["length"])
+
+    fig_size = (_dynamic_figsize(valid, len_scale) if dynamic_size
+                else (figsize or (10, 8)))
+    fig, ax = plt.subplots(figsize=fig_size)
+
+    ax.scatter(valid["x"] / len_scale, valid["y"] / len_scale,
+               s=20, color="tab:blue", zorder=3)
+    ax.set_aspect("equal", adjustable="datalim")
+
+    # Optional title enrichment: if every point shares one z, show it.
+    used_title = title if title is not None else _build_title(
+        df, load_name, units_def)
+    if used_title:
+        ax.set_title(used_title)
+
+    ax.set_xlabel(f"X ({len_unit})")
+    ax.set_ylabel(f"Y ({len_unit})")
+    ax.grid(True, linestyle=":", alpha=0.6)
+
+    for _, row in valid.iterrows():
+        label = _format_label(row, comps, units_def)
+        ax.annotate(
+            label,
+            (row["x"] / len_scale, row["y"] / len_scale),
+            xytext=(-6, -18),
+            textcoords="offset points",
+            fontsize=label_fontsize,
+            family="monospace",
+            bbox=dict(
+                boxstyle="round,pad=0.1",
+                fc="white",
+                ec="gray",
+                alpha=0.9,
+            ),
+            zorder=4,
+            annotation_clip=True,
+        )
+
+    fig.tight_layout()
+    return fig
+
+
 def _plot_one(
     df,
     out_dir: Path,
@@ -224,68 +348,28 @@ def _plot_one(
     title: str | None,
     units_def: dict,
     label_fontsize: float,
+    dynamic_size: bool = True,
+    figsize: tuple[float, float] | None = None,
+    dpi: int = 800,
     tag: str | None = None,
 ) -> Path:
-    """Render one plan-view figure for a single load and return its path."""
+    """Render one plan-view figure for a single load and save + close it."""
     import matplotlib  # noqa: PLC0415
     import matplotlib.pyplot as plt  # noqa: PLC0415
 
-    # Skip points with unresolved coordinates; never crash.  (x/y come from
-    # the DataFrame where unresolvable coords were kept as NaN.)
-    valid = df[df["x"].notna() & df["y"].notna()]
-    if len(valid) == 0:
-        logger.warning("No plottable points for load %r; skipping figure.", load_name)
+    comps_out = comps
+    fig = build_base_reactions_figure(
+        df, load_name, components=comps_out, title=title, units=units_def,
+        label_fontsize=label_fontsize, dynamic_size=dynamic_size,
+        figsize=figsize,
+    )
+    if fig is None:
         return Path()
-
-    # One per-point label: for envelope loads a point may appear in several
-    # rows (e.g. Max/Min envelope steps).  Keep, per component, the row whose
-    # value has the largest absolute magnitude (sign preserved).
-    valid = _aggregate_maxabs(valid, comps)
-
-    len_scale = _scale(units_def, "length_scale")
-    len_unit = str(units_def["length"])
-
-    figsize = _dynamic_figsize(valid, len_scale)
-    fig, ax = plt.subplots(figsize=figsize)
     try:
-        ax.scatter(valid["x"] / len_scale, valid["y"] / len_scale,
-                   s=20, color="tab:blue", zorder=3)
-        ax.set_aspect("equal", adjustable="datalim")
-
-        # Optional title enrichment: if every point shares one z, show it.
-        used_title = title if title is not None else _build_title(
-            df, load_name, units_def)
-        if used_title:
-            ax.set_title(used_title)
-
-        ax.set_xlabel(f"X ({len_unit})")
-        ax.set_ylabel(f"Y ({len_unit})")
-        ax.grid(True, linestyle=":", alpha=0.6)
-
-        for _, row in valid.iterrows():
-            label = _format_label(row, comps, units_def)
-            ax.annotate(
-                label,
-                (row["x"] / len_scale, row["y"] / len_scale),
-                xytext=(-6, -12),
-                textcoords="offset points",
-                fontsize=label_fontsize,
-                family="monospace",
-                bbox=dict(
-                    boxstyle="round,pad=0.25",
-                    fc="white",
-                    ec="gray",
-                    alpha=0.9,
-                ),
-                zorder=4,
-                annotation_clip=True,
-            )
-
-        fig.tight_layout()
         safe = _sanitize_filename(load_name)
         stem = _append_tag(f"base_{safe}_plan", tag)
         path = out_dir / f"{stem}.{fmt}"
-        fig.savefig(path, dpi=800, bbox_inches="tight")
+        fig.savefig(path, dpi=dpi, bbox_inches="tight")
         return path
     finally:
         plt.close(fig)
@@ -446,8 +530,14 @@ def _fmt_plain(value: float) -> str:
         return str(value)
 
 
-def _resolve_units(units: str) -> dict:
-    """Return the unit system dict for ``units``, raising on unknown keys."""
+def _resolve_units(units: str | dict) -> dict:
+    """Return the unit system dict for ``units``.
+
+    Accepts either a unit-system name (``"model"`` / ``"kN-m"``, validated
+    against :data:`UNITS`) or an already-resolved unit dict (pass-through).
+    """
+    if isinstance(units, dict):
+        return units
     if units not in UNITS:
         raise ValueError(
             f"Unknown unit system {units!r}. Known: {', '.join(UNITS)}."
@@ -485,4 +575,5 @@ __all__ = [
     "UNITS",
     "plot_base_reactions",
     "plot_base_reactions_from_csv",
+    "build_base_reactions_figure",
 ]

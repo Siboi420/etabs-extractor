@@ -24,6 +24,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Base-reaction export unit conversion.  ETABS reports reaction forces in N and
+# reaction moments in N·mm (model units); the base-reaction export converts
+# them to kN (÷1000) and kN·m (÷1e6) at record construction so the DataFrame
+# and every CSV carry the converted values.  Coordinates (x/y/z) are NOT
+# converted and stay in the model's length units (mm).
+BASE_FORCE_SCALE = 1000.0   # N   -> kN
+BASE_MOMENT_SCALE = 1e6     # N·mm -> kN·m
+
 
 class ExtractionError(RuntimeError):
     """Raised for user-facing extraction failures (missing model, no names)."""
@@ -393,12 +401,13 @@ def _read_point_reactions(
                 z=z,
                 load_name=name,
                 load_kind=kind,
-                F1=_f(F1, i),
-                F2=_f(F2, i),
-                F3=_f(F3, i),
-                M1=_f(M1, i),
-                M2=_f(M2, i),
-                M3=_f(M3, i),
+                # Convert model units (N / N·mm) to exported units (kN / kN·m).
+                F1=_f(F1, i) / BASE_FORCE_SCALE,
+                F2=_f(F2, i) / BASE_FORCE_SCALE,
+                F3=_f(F3, i) / BASE_FORCE_SCALE,
+                M1=_f(M1, i) / BASE_MOMENT_SCALE,
+                M2=_f(M2, i) / BASE_MOMENT_SCALE,
+                M3=_f(M3, i) / BASE_MOMENT_SCALE,
             )
         )
     return records

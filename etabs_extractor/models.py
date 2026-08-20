@@ -132,9 +132,10 @@ class JointReactionRecord:
     """One per-joint (point-object) reaction result from ``Results.JointReact``.
 
     ``F1/F2/F3`` are reaction forces and ``M1/M2/M3`` are reaction moments in
-    the model's global axes (model units: N / N.mm), matching ETABS output.
-    ``x/y/z`` are the point's global coordinates (length units, e.g. mm); ``z``
-    is the elevation.  Coordinates are ``None`` when the point object could
+    the model's global axes, converted to **exported units**: forces in kN and
+    moments in kN·m (from the model's source N / N·mm).  ``x/y/z`` are the
+    point's global coordinates (model length units, e.g. mm); ``z`` is the
+    elevation.  Coordinates are ``None`` when the point object could
     not be resolved (kept as ``NaN`` in the DataFrame rather than raising).
     """
 
@@ -148,13 +149,13 @@ class JointReactionRecord:
     load_name: str        # load case or combination name
     load_kind: str        # "COMBO" or "CASE"
 
-    # Reaction forces / moments (model units, global axes)
-    F1: float             # reaction force along global X (N)
-    F2: float             # reaction force along global Y (N)
-    F3: float             # reaction force along global Z (N)
-    M1: float             # reaction moment about global X (N.mm)
-    M2: float             # reaction moment about global Y (N.mm)
-    M3: float             # reaction moment about global Z (N.mm)
+    # Reaction forces / moments (exported units, global axes)
+    F1: float             # reaction force along global X (kN)
+    F2: float             # reaction force along global Y (kN)
+    F3: float             # reaction force along global Z (kN)
+    M1: float             # reaction moment about global X (kN·m)
+    M2: float             # reaction moment about global Y (kN·m)
+    M3: float             # reaction moment about global Z (kN·m)
 
     def to_dict(self) -> dict:
         """Return an ordered dict suitable for CSV/DataFrame rows."""
