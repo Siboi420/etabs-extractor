@@ -354,18 +354,34 @@ compatible, defaults unchanged):
 - `dpi: int = 800` — save resolution (replaces the hardcoded ``800`` in
   ``savefig``).
 - `label_fontsize` — already existed (default ``2.4``).
+- **`x_offset: float = 1.0` / `y_offset: float = 1.0`** — reserved whitespace
+  margins (inches) around the plot area so edge point labels do not clip into
+  the axes. Final figure size = base size + `2*x_offset` × `2*y_offset`;
+  axes positioned via `fig.subplots_adjust(left=x/W, right=1-x/W, bottom=y/H,
+  top=1-y/H)` (replaces the previous unconditional `fig.tight_layout()`). To
+  reproduce the pre-change size pass `x_offset=0, y_offset=0`.
 - Threaded through `plot_base_reactions`, `plot_base_reactions_from_csv`,
   and the new `build_base_reactions_figure`.
 
 `build_base_reactions_figure(df, load_name, *, components, title, units,
-label_fontsize, dynamic_size, figsize) -> Figure | None` is a new **public**
-reusable figure builder: it draws one plan-view figure (scatter +
-annotations + title/axes) **without saving**, and returns ``None`` when a
-load has no plottable points. `_plot_one` now calls it then `savefig(...
-, dpi=dpi)` and closes. The GUI preview renders it into a `PlotPreviewFrame`
-canvas inside a **separate pop-up window** (`PlotPreviewWindow`, a
-`tk.Toplevel`) opened manually via the `Plot preview` button — not embedded
-in the main window.
+label_fontsize, dynamic_size, figsize, x_offset, y_offset) -> Figure | None`
+is a new **public** reusable figure builder: it draws one plan-view figure
+(scatter + annotations + title/axes) **without saving**, and returns ``None``
+when a load has no plottable points. `_plot_one` now calls it then
+`savefig(..., dpi=dpi)` and closes. The GUI preview renders it into a
+`PlotPreviewFrame` canvas inside a **separate pop-up window**
+(`PlotPreviewWindow`, a `tk.Toplevel`) opened manually via the `Plot preview`
+button — not embedded in the main window.
+
+The offset layout changes in `build_base_reactions_figure`:
+
+- figure size = base + `2*x_offset` × `2*y_offset`;
+- `ax.set_aspect("equal", adjustable="datalim")` → `adjustable="box"` so
+  equal-aspect letterboxes sit inside the reserved plot area rather than
+  stretching data into the margins;
+- annotations set `annotation_clip=False` and `clip_on=False` so labels render
+  into the reserved margin; `_plot_one` keeps `bbox_inches="tight"` so saved
+  images expand to fit the outermost label.
 
 New COM touchpoint (quarantined in `connection.py`):
 `EtabsSession.get_model_filename(include_path: bool = True) -> str` — calls
@@ -379,18 +395,25 @@ on the fake `SapModel`, returning a plain string).
 GUI layout/behaviour (full detail in `service.py` / `app.py`):
 
 - **Model row**: file entry + Browse (`.EDB`/`.et`) + "Check active model"
-  (attaches to ETABS, backfills via `get_model_filename`).
+  (attaches to ETABS, backfills the path via `get_model_filename`, and also
+  reads `get_combo_names` / `get_case_names` to populate the load dropdown
+  below — see "Searchable multi-select load dropdown").
 - **Destination row**: dir entry + Browse (defaults from `ETABS_OUTPUT`),
   **Tag row** (sanitized like `io._sanitize_filename`).
-- **Combo field** (free text, comma-separated; empty = all model combos),
-  optional `elevation`, `only_loaded`, `run_analysis`, `attach` checkboxes.
+- **Load selection** — a **searchable multi-select checklist** widget
+  (`LoadSelectionField` in `gui/widgets/load_selection.py`) of the active
+  model's **combos + cases**; empty selection keeps today's default (all model
+  combos). Selecting both kinds extracts both (see "Both-streams extraction").
+  Plus optional `elevation`, `only_loaded`, `run_analysis`, `attach`
+  checkboxes.
   Note: the plot preview renders one marker per distinct plan (x/y) point
   returned by the extraction — envelope Max/Min steps collapse to one
   governing marker per point (no duplication). But all-zero (non-load-bearing)
   base joints are still plotted unless **only_loaded** is checked; for a clean
   plan use `elevation` + `only_loaded`.
 - **Plot settings frame**: `dynamic_size` checkbox, width/height (disabled
-  when dynamic), dpi (default 800), label font size (default 2.4), units
+  when dynamic), **X/Y label offset (in)** fields (default 1.0 each), dpi
+  (default 800), label font size (default 2.4), units
   (`model`/`kN-m`), format (`png`/`pdf`/`svg`). "Plot after extract".
 - **CSV section (no ETABS)**: CSV file + Browse + "Load preview".
 - **Plot preview pop-up (manual)**: a separate `tk.Toplevel`
@@ -407,6 +430,59 @@ GUI layout/behaviour (full detail in `service.py` / `app.py`):
 Launcher: `./run_gui.sh` (mirrors `run_etabs.sh`) → Windows Python
 `python -m etabs_extractor.gui`. Installable console script:
 `etabs-extractor-gui` via `[project.scripts]` in `pyproject.toml`.
+
+### Completed: searchable multi-select load dropdown + both-streams extraction
+
+Two linked changes replace the GUI's free-text combo field with an
+interactive checklist, and let **combos and cases be extracted together**:
+
+- **`service.inspect_active_model(attach=True, session=None) -> dict`** — a
+  richer replacement for the old `check_active_model`: returns
+  `{"model_path", "combos", "cases"}` by reading
+  `get_model_filename` / `get_combo_names` / `get_case_names`. `check_active_model`
+  is now a thin wrapper returning `inspect_active_model(...)['model_path']`
+  (kept for backward compatibility; internal GUI API only).
+- **`LoadSelectionModel`** (in `gui/state.py`, pure/headless-testable): holds
+  distinct combo + case item lists with `selected` flags, a `matches(query)`
+  substring filter, and `get_selected() -> (combos, cases)`. `set_items`,
+  `set_selected`, `toggle(index, bool)`, `clear` round out the API.
+- **`LoadSelectionField`** (new `gui/widgets/load_selection.py`) — a `tk.Frame`
+  with a read-only summary entry ("N selected" / "all combos") that opens a
+  `tk.Toplevel` popup on the **Select** button / entry click. The popup has a
+  search `ttk.Entry` (filters the checklist as you type, case-insensitive
+  substring over the `(combo) NAME` / `(case) NAME` labels) and a scrolling
+  checklist of `ttk.Checkbutton`s; a **Done** button closes it. Selection
+  persists across opens. API: `set_items(combos, cases)`, `get_selected()`, `clear()`.
+- **`app.py`** — `self.combo_field` (`LabeledEntry`) is replaced by
+  `self.load_field` (`LoadSelectionField`) under "Load selection". `on_check_model`
+  / `_on_check_done` now call `inspect_active_model`, backfill the model path,
+  and call `load_field.set_items(combos, cases)`. `_collect_settings` stores
+  `selected_combos` / `selected_cases` on `GuiSettings`.
+- **`gui/state.py`** — `GuiSettings.combos` (free-text string) is **removed**
+  in favor of `selected_combos: list[str]` and `selected_cases: list[str]`
+  (default empty). `parse_combos` stays as a utility (no longer used by the
+  GUI flow).
+- **`service.build_extract_kwargs`** — maps `combos = selected_combos or None`,
+  `cases = selected_cases or None`; empty selection → `None` (the existing "all
+  model combos" default).
+- **Both-streams extraction (CLI + GUI)**: `results._resolve_names` gained a
+  both-streams branch — when both `combos` and `cases` are passed (both
+  non-`None`), it returns `(combos, cases)` instead of cases superseding
+  combos. All other branches (all_requested / cases-only / combos-only /
+  default-all-combos) are unchanged. This is deliberate: passing `--combos`
+  and `--cases` together now extracts both.
+- **`EtabsSession.setup_select_loads(combos, cases)`** (COM, `connection.py`):
+  calls `DeselectAllCasesAndCombosForOutput()` **once**, then selects the given
+  combos and cases together. `extract_forces` / `extract_base_reactions` now
+  call it when both streams are requested (the old separate
+  `setup_select_combos` then `setup_select_cases` calls each `DeselectAll...`
+  the other, so they would clobber each other). `setup_select_combos` /
+  `setup_select_cases` are kept for compatibility. Mirror it on `_FakeSession`
+  in `tests/test_dry_run.py`, and make the fake `_records_for` return the
+  **union** of selected combos + cases (matching the real COM contract).
+- **Label offsets**: see the "Plot appearance" bullet in the GUI section above
+  for the `x_offset` / `y_offset` params and the margin layout in
+  `build_base_reactions_figure`.
 
 ### Completed: plan-view plotting of base reactions
 

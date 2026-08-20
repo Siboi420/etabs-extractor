@@ -113,6 +113,8 @@ def plot_base_reactions(
     dynamic_size: bool = True,
     figsize: tuple[float, float] | None = None,
     dpi: int = 800,
+    x_offset: float = 1.0,
+    y_offset: float = 1.0,
     tag: str | None = None,
 ) -> list[Path]:
     """Render plan-view (x-y) figures of base reactions and save them.
@@ -143,7 +145,12 @@ def plot_base_reactions(
         ``dynamic_size=False`` (default ``(10, 8)``).
     :param dpi: save resolution in dots-per-inch (passed to ``savefig``;
         default ``800``).
-    :param tag: optional suffix appended to each figure filename stem (e.g.
+    :param x_offset: reserved whitespace margin (inches) to the left/right of
+        the plotted data, so point labels near the plot edges do not clip into
+        the axes.  Default ``1.0``.
+    :param y_offset: reserved whitespace margin (inches) above/below the plot
+        area.  Default ``1.0``.
+    :param tag: optional suffix appended to each plotted file stem (e.g.
         ``KM13`` -> ``base_<load>_plan_KM13.png``).  Absent/empty = no suffix.
     :returns: the list of written :class:`Path` objects.
     """
@@ -163,7 +170,8 @@ def plot_base_reactions(
         written.append(
             _plot_one(single, out, load_name, comps, fmt=fmt, title=title,
                       units_def=units_def, label_fontsize=label_fontsize,
-                      dynamic_size=dynamic_size, figsize=figsize, dpi=dpi, tag=tag)
+                      dynamic_size=dynamic_size, figsize=figsize, dpi=dpi,
+                      x_offset=x_offset, y_offset=y_offset, tag=tag)
         )
         return written
 
@@ -171,7 +179,8 @@ def plot_base_reactions(
         written.append(
             _plot_one(grp, out, str(name), comps, fmt=fmt, title=title,
                       units_def=units_def, label_fontsize=label_fontsize,
-                      dynamic_size=dynamic_size, figsize=figsize, dpi=dpi, tag=tag)
+                      dynamic_size=dynamic_size, figsize=figsize, dpi=dpi,
+                      x_offset=x_offset, y_offset=y_offset, tag=tag)
         )
     return written
 
@@ -188,6 +197,8 @@ def plot_base_reactions_from_csv(
     dynamic_size: bool = True,
     figsize: tuple[float, float] | None = None,
     dpi: int = 800,
+    x_offset: float = 1.0,
+    y_offset: float = 1.0,
     tag: str | None = None,
 ) -> list[Path]:
     """Read a base-reaction CSV and plot it (no model / COM required).
@@ -212,7 +223,8 @@ def plot_base_reactions_from_csv(
                                title=title, units=units,
                                label_fontsize=label_fontsize,
                                dynamic_size=dynamic_size, figsize=figsize,
-                               dpi=dpi, tag=tag)
+                               dpi=dpi, x_offset=x_offset, y_offset=y_offset,
+                               tag=tag)
 
 
 def _validate_components(comps: Sequence[str]) -> None:
@@ -251,6 +263,8 @@ def build_base_reactions_figure(
     label_fontsize: float = 2.4,
     dynamic_size: bool = True,
     figsize: tuple[float, float] | None = None,
+    x_offset: float = 1.0,
+    y_offset: float = 1.0,
 ) -> "Figure | None":
     """Build (but **do not** save) one plan-view figure for a single load.
 
@@ -274,6 +288,11 @@ def build_base_reactions_figure(
         otherwise use the fixed ``figsize`` (inches).
     :param figsize: fixed figure size in inches for ``dynamic_size=False``
         (default ``(10, 8)``).
+    :param x_offset: reserved whitespace margin (in) to the left/right of the
+        plotted data area.  Default ``1.0``; ``0`` reproduces the pre-change
+        size.
+    :param y_offset: reserved whitespace margin (in) above/below the plot
+        area.  Default ``1.0``.
     """
     import matplotlib  # noqa: PLC0415
     import matplotlib.pyplot as plt  # noqa: PLC0415
@@ -297,13 +316,16 @@ def build_base_reactions_figure(
     len_scale = _scale(units_def, "length_scale")
     len_unit = str(units_def["length"])
 
-    fig_size = (_dynamic_figsize(valid, len_scale) if dynamic_size
-                else (figsize or (10, 8)))
+    base_size = (_dynamic_figsize(valid, len_scale) if dynamic_size
+                 else (figsize or (10, 8)))
+    fig_width = base_size[0] + 2 * x_offset
+    fig_height = base_size[1] + 2 * y_offset
+    fig_size = (max(fig_width, 1.0), max(fig_height, 1.0))
     fig, ax = plt.subplots(figsize=fig_size)
 
     ax.scatter(valid["x"] / len_scale, valid["y"] / len_scale,
                s=20, color="tab:blue", zorder=3)
-    ax.set_aspect("equal", adjustable="datalim")
+    ax.set_aspect("equal", adjustable="box")
 
     # Optional title enrichment: if every point shares one z, show it.
     used_title = title if title is not None else _build_title(
@@ -331,10 +353,23 @@ def build_base_reactions_figure(
                 alpha=0.9,
             ),
             zorder=4,
-            annotation_clip=True,
+            annotation_clip=False,
+            clip_on=False,
         )
 
-    fig.tight_layout()
+    # Reserve symmetric whitespace margins around the plot area so edge-point
+    # labels render inside the figure instead of clipping into the axes.  The
+    # axes box (in figure-fraction units) sits between these margins.
+    w, h = fig.get_size_inches()
+    if x_offset > 0 or y_offset > 0:
+        fig.subplots_adjust(
+            left=x_offset / w,
+            right=1 - x_offset / w,
+            bottom=y_offset / h,
+            top=1 - y_offset / h,
+        )
+    else:
+        fig.subplots_adjust(left=0.1, right=0.9, bottom=0.1, top=0.9)
     return fig
 
 
@@ -351,6 +386,8 @@ def _plot_one(
     dynamic_size: bool = True,
     figsize: tuple[float, float] | None = None,
     dpi: int = 800,
+    x_offset: float = 1.0,
+    y_offset: float = 1.0,
     tag: str | None = None,
 ) -> Path:
     """Render one plan-view figure for a single load and save + close it."""
@@ -361,7 +398,7 @@ def _plot_one(
     fig = build_base_reactions_figure(
         df, load_name, components=comps_out, title=title, units=units_def,
         label_fontsize=label_fontsize, dynamic_size=dynamic_size,
-        figsize=figsize,
+        figsize=figsize, x_offset=x_offset, y_offset=y_offset,
     )
     if fig is None:
         return Path()

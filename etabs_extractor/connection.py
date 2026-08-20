@@ -286,6 +286,21 @@ class EtabsSession:
         for c in cases or []:
             setup.SetCaseSelectedForOutput(c, True)
 
+    def setup_select_loads(self, combos: list[str] | None, cases: list[str] | None) -> None:
+        """Select both ``combos`` and ``cases`` together for output.
+
+        Combines the two separate selection calls into one so both streams stay
+        selected (calling ``setup_select_combos`` then ``setup_select_cases``
+        would otherwise have each one ``DeselectAll...`` the other).  Deselects
+        everything once, then selects the given combos and cases.
+        """
+        setup = self.sap_model.Results.Setup
+        setup.DeselectAllCasesAndCombosForOutput()
+        for c in combos or []:
+            setup.SetComboSelectedForOutput(c, True)
+        for c in cases or []:
+            setup.SetCaseSelectedForOutput(c, True)
+
     # -- Base (joint) reaction reads -----------------------------------------
 
     def get_point_names(self) -> list[str]:

@@ -35,6 +35,7 @@ import pandas as pd  # noqa: E402
 
 from etabs_extractor.gui.state import (  # noqa: E402
     GuiSettings,
+    LoadSelectionModel,
     parse_combos,
     parse_elevation,
 )
@@ -81,16 +82,60 @@ def test_gui_imports_without_display():
 
 def test_build_figure_fixed_size():
     df = _sample_df()
+    # Offsets default to 1.0in each way, so the base (12, 6) becomes (14, 8).
     fig = build_base_reactions_figure(
         df, "ASD 1",
         dynamic_size=False, figsize=(12, 6), label_fontsize=5,
+        x_offset=1, y_offset=1,
     )
     assert fig is not None, "expected a Figure for plottable data"
+    w, h = fig.get_size_inches()
+    assert abs(w - 14.0) < 1e-6 and abs(h - 8.0) < 1e-6, (w, h)
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+    print("build_base_reactions_figure fixed figsize + offsets OK")
+
+
+def test_build_figure_zero_offset_reproduces_base():
+    """Offsets of 0 reproduce the pre-change base size exactly."""
+    df = _sample_df()
+    fig = build_base_reactions_figure(
+        df, "ASD 1",
+        dynamic_size=False, figsize=(12, 6), label_fontsize=5,
+        x_offset=0, y_offset=0,
+    )
+    assert fig is not None
     w, h = fig.get_size_inches()
     assert abs(w - 12.0) < 1e-6 and abs(h - 6.0) < 1e-6, (w, h)
     import matplotlib.pyplot as plt
     plt.close(fig)
-    print("build_base_reactions_figure fixed figsize OK")
+    print("build_base_reactions_figure zero offsets -> base size OK")
+
+
+def test_plot_base_reactions_offset_threading():
+    """Offsets thread through to the built figure; writes a non-empty PNG with
+    no edge-label clipping exception."""
+    df = _sample_df()
+    with tempfile.TemporaryDirectory() as td:
+        paths = plot_base_reactions(
+            df, td, dpi=100, dynamic_size=False, figsize=(12, 6),
+            label_fontsize=5, load_name="ASD 1",
+            x_offset=1.5, y_offset=0.5,
+        )
+        assert len(paths) == 1, paths
+        p = paths[0]
+        assert p.exists() and p.stat().st_size > 0, p
+        # Rebuild via the public figure builder to confirm size accounting.
+        fig = build_base_reactions_figure(
+            df, "ASD 1", dynamic_size=False, figsize=(12, 6),
+            x_offset=1.5, y_offset=0.5,
+        )
+        assert fig is not None
+        w, h = fig.get_size_inches()
+        assert abs(w - 15.0) < 1e-6 and abs(h - 7.0) < 1e-6, (w, h)
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+        print("plot_base_reactions offsets threaded OK")
 
 
 def test_build_figure_dynamic_size():
@@ -98,12 +143,30 @@ def test_build_figure_dynamic_size():
     fig = build_base_reactions_figure(df, "ASD 1", dynamic_size=True)
     assert fig is not None
     w, h = fig.get_size_inches()
-    # Data spans x in [0, 6000], y in [0, 0] (single row y=0). With a 0 y-span
-    # the dynamic sizing still yields a sane non-default canvas (>= 6x5 min).
-    assert w >= 6.0 and h >= 5.0, (w, h)
+    # Dynamic base canvas (>= 6x5 min) plus 2*default 1in offsets each way
+    # => final size >= 8x7.
+    assert w >= 8.0 and h >= 7.0, (w, h)
     import matplotlib.pyplot as plt
     plt.close(fig)
-    print("build_base_reactions_figure dynamic size OK")
+    print("build_base_reactions_figure dynamic size + offsets OK")
+
+
+def test_build_figure_dynamic_offset_extends_dynamic_base():
+    """Dynamic mode: final size == _dynamic_figsize result + 2*offset each way.
+
+    We call the public figure builder and check that subtracting 2*offset
+    recovers a size the dynamic sizer would have produced (>= 6x5)."""
+    df = _sample_df()
+    fig = build_base_reactions_figure(
+        df, "ASD 1", dynamic_size=True, x_offset=1.5, y_offset=0.5,
+    )
+    assert fig is not None
+    w, h = fig.get_size_inches()
+    base_w, base_h = w - 3.0, h - 1.0
+    assert base_w >= 6.0 and base_h >= 5.0, (base_w, base_h)
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+    print("build_base_reactions_figure dynamic base + offsets OK")
 
 
 def test_build_figure_none_for_no_points():
@@ -133,7 +196,8 @@ def test_service_extract_kwargs_mapping():
         model_path="/mnt/d/models/x.EDB",
         output_dir="/mnt/d/out",
         tag="KM13",
-        combos="ASD 1, LRFD 1",
+        selected_combos=["ASD 1", "LRFD 1"],
+        selected_cases=["Dead"],
         elevation="-16000",
         only_loaded=True,
         run_analysis=False,
@@ -143,16 +207,64 @@ def test_service_extract_kwargs_mapping():
     assert kw["model_path"] == "/mnt/d/models/x.EDB"
     assert kw["output_dir"] == "/mnt/d/out"
     assert kw["combos"] == ["ASD 1", "LRFD 1"]
+    assert kw["cases"] == ["Dead"]
     assert kw["elevation"] == -16000.0
     assert kw["only_loaded"] is True
     assert kw["attach"] is True
     assert kw["launch"] is False
     assert kw["tag"] == "KM13"
-    # Empty combos -> None (all model combos).
-    s2 = GuiSettings(combos="")
+    # Empty selection -> both None (all model combos default).
+    s2 = GuiSettings()
     kw2 = service.build_extract_kwargs(s2)
     assert kw2["combos"] is None
+    assert kw2["cases"] is None
     print("service.build_extract_kwargs OK")
+
+
+def test_load_selection_model():
+    """LoadSelectionModel filtering + split selection retrieval."""
+    model = LoadSelectionModel(combos=["ASD 1", "LRFD Max"], cases=["Dead", "Live"])
+    assert model.all_combos == ["ASD 1", "LRFD Max"]
+    assert model.all_cases == ["Dead", "Live"]
+    # Substring filter matches across both kinds (case-insensitive).
+    matched = model.matches("asd")
+    assert [it.name for it in matched] == ["ASD 1"], matched
+    matched2 = model.matches("1")
+    assert {it.name for it in matched2} == {"ASD 1"}, matched2
+    matched3 = model.matches("dead")
+    assert [it.name for it in matched3] == ["Dead"], matched3
+    # Empty query returns all items.
+    assert len(model.matches("")) == 4
+    # Toggle selection and retrieve as split (combos, cases).
+    items = model.items()
+    model.toggle(items.index([i for i in items if i.name == "ASD 1"][0]), True)
+    model.toggle(items.index([i for i in items if i.name == "Dead"][0]), True)
+    combos, cases = model.get_selected()
+    assert combos == ["ASD 1"], combos
+    assert cases == ["Dead"], cases
+    # Selection persists across a filter round-trip.
+    assert model.matches("")[0].selected is True
+    print("LoadSelectionModel OK")
+
+
+def test_inspect_active_model_fake():
+    """inspect_active_model with an injected fake session returns model path + 
+    combos + cases."""
+    class _Fake:
+        def get_model_filename(self, include_path=True):
+            return "D:\\Models\\fake.EDB"
+        def get_combo_names(self):
+            return ["ASD 1", "LRFD 1"]
+        def get_case_names(self):
+            return ["Dead", "Live"]
+
+    info = service.inspect_active_model(attach=False, session=_Fake())
+    assert info["model_path"] == "D:\\Models\\fake.EDB"
+    assert info["combos"] == ["ASD 1", "LRFD 1"]
+    assert info["cases"] == ["Dead", "Live"]
+    # The richer call drives check_active_model bag to the same path.
+    assert service.check_active_model(attach=False, session=_Fake()).startswith("D:\\")
+    print("inspect_active_model (fake) OK")
 
 
 def test_service_plot_kwargs_mapping():
@@ -167,6 +279,8 @@ def test_service_plot_kwargs_mapping():
     assert kw["units"] == "kN-m"
     assert kw["fmt"] == "svg"
     assert kw["tag"] == "x"
+    assert kw["x_offset"] == 1.0
+    assert kw["y_offset"] == 1.0
     # Dynamic (default) -> figsize is None.
     s2 = GuiSettings(dynamic_size=True)
     kw2 = service.build_plot_kwargs(s2)
@@ -195,10 +309,15 @@ def test_state_parsing():
 def run():
     test_gui_imports_without_display()
     test_build_figure_fixed_size()
+    test_build_figure_zero_offset_reproduces_base()
+    test_plot_base_reactions_offset_threading()
     test_build_figure_dynamic_size()
+    test_build_figure_dynamic_offset_extends_dynamic_base()
     test_build_figure_none_for_no_points()
     test_plot_base_reactions_dpi_figsize()
     test_service_extract_kwargs_mapping()
+    test_load_selection_model()
+    test_inspect_active_model_fake()
     test_service_plot_kwargs_mapping()
     test_state_parsing()
     print("PASSED")

@@ -53,23 +53,34 @@ class PlotSettingsFrame(ttk.LabelFrame):
         self.label_font_entry = ttk.Entry(self, textvariable=self.label_font_var, width=10)
         self.label_font_entry.grid(row=4, column=1, sticky="w", padx=2)
 
+        # X / Y label-offset margins (inches).  Reserved whitespace around the
+        # plot area so edge labels do not clip into the axes.
+        self.x_offset_var = tk.StringVar(value=str(self._settings.x_offset))
+        self.y_offset_var = tk.StringVar(value=str(self._settings.y_offset))
+        ttk.Label(self, text="X offset (in)").grid(row=5, column=0, sticky="e", padx=(8, 2))
+        self.x_offset_entry = ttk.Entry(self, textvariable=self.x_offset_var, width=10)
+        self.x_offset_entry.grid(row=5, column=1, sticky="w", padx=2)
+        ttk.Label(self, text="Y offset (in)").grid(row=6, column=0, sticky="e", padx=(8, 2))
+        self.y_offset_entry = ttk.Entry(self, textvariable=self.y_offset_var, width=10)
+        self.y_offset_entry.grid(row=6, column=1, sticky="w", padx=2)
+
         # Units dropdown.
-        ttk.Label(self, text="Units").grid(row=5, column=0, sticky="e", padx=(8, 2))
+        ttk.Label(self, text="Units").grid(row=7, column=0, sticky="e", padx=(8, 2))
         self.units_var = tk.StringVar(value=self._settings.units)
         self.units_combo = ttk.Combobox(
             self, textvariable=self.units_var, values=list(UNITS_CHOICES),
             state="readonly", width=9,
         )
-        self.units_combo.grid(row=5, column=1, sticky="w", padx=2)
+        self.units_combo.grid(row=7, column=1, sticky="w", padx=2)
 
         # Format dropdown.
-        ttk.Label(self, text="Format").grid(row=6, column=0, sticky="e", padx=(8, 2))
+        ttk.Label(self, text="Format").grid(row=8, column=0, sticky="e", padx=(8, 2))
         self.format_var = tk.StringVar(value=self._settings.format)
         self.format_combo = ttk.Combobox(
             self, textvariable=self.format_var, values=list(FORMATS),
             state="readonly", width=9,
         )
-        self.format_combo.grid(row=6, column=1, sticky="w", padx=2)
+        self.format_combo.grid(row=8, column=1, sticky="w", padx=2)
 
         self._sync_dim_enabled()
 
@@ -87,6 +98,8 @@ class PlotSettingsFrame(ttk.LabelFrame):
         s.fig_height = parse_float(self.height_var.get(), s.fig_height)
         s.dpi = parse_int(self.dpi_var.get(), s.dpi)
         s.label_fontsize = parse_float(self.label_font_var.get(), s.label_fontsize)
+        s.x_offset = parse_float(self.x_offset_var.get(), s.x_offset)
+        s.y_offset = parse_float(self.y_offset_var.get(), s.y_offset)
         s.units = self.units_var.get() if self.units_var.get() in UNITS_CHOICES else s.units
         s.format = self.format_var.get() if self.format_var.get() in FORMATS else s.format
         return s
@@ -97,6 +110,8 @@ class PlotSettingsFrame(ttk.LabelFrame):
         self.height_var.set(str(settings.fig_height))
         self.dpi_var.set(str(settings.dpi))
         self.label_font_var.set(str(settings.label_fontsize))
+        self.x_offset_var.set(str(settings.x_offset))
+        self.y_offset_var.set(str(settings.y_offset))
         self.units_var.set(settings.units)
         self.format_var.set(settings.format)
         self._sync_dim_enabled()

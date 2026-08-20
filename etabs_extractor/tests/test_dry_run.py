@@ -50,14 +50,17 @@ class _FakeFrameForce:
 
     def _records_for(self, frame: str) -> list[dict]:
         """Return the records for ``frame`` filtered to the currently-selected
-        output load names — emulating COM selection behaviour."""
-        selected = None
+        output load names — emulating COM selection behaviour.  When both
+        combos and cases are selected (via ``setup_select_loads``), the union
+        of both streams is returned."""
+        selected: set | None = None
         if self._setup is not None:
-            # Respect whichever stream was selected most recently.
-            if self._setup.selected_combos:
-                selected = set(self._setup.selected_combos)
-            elif self._setup.selected_cases:
-                selected = set(self._setup.selected_cases)
+            selected = (set(self._setup.selected_combos)
+                        if self._setup.selected_combos else set())
+            if self._setup.selected_cases:
+                selected = selected.union(self._setup.selected_cases)
+            if not selected:
+                selected = None
         recs = self.data_by_frame.get(frame, [])
         if selected is None:
             return recs
@@ -158,12 +161,14 @@ class _FakeJointReact:
         self._setup: "_FakeSetup | None" = None
 
     def _records_for(self, point: str) -> list[dict]:
-        selected = None
+        selected: set | None = None
         if self._setup is not None:
-            if self._setup.selected_combos:
-                selected = set(self._setup.selected_combos)
-            elif self._setup.selected_cases:
-                selected = set(self._setup.selected_cases)
+            selected = (set(self._setup.selected_combos)
+                        if self._setup.selected_combos else set())
+            if self._setup.selected_cases:
+                selected = selected.union(self._setup.selected_cases)
+            if not selected:
+                selected = None
         recs = self.data_by_point.get(point, [])
         if selected is None:
             return recs
@@ -281,6 +286,16 @@ class _FakeSession(_extractor_connection.EtabsSession):
     def setup_select_cases(self, cases):
         s = self.sap_model.Results.Setup
         s.DeselectAllCasesAndCombosForOutput()
+        for c in (cases or []):
+            s.SetCaseSelectedForOutput(c, True)
+
+    def setup_select_loads(self, combos, cases):
+        """Mirror ``setup_select_loads`` on the real session: deselect once,
+        then select both combos and cases together."""
+        s = self.sap_model.Results.Setup
+        s.DeselectAllCasesAndCombosForOutput()
+        for c in (combos or []):
+            s.SetComboSelectedForOutput(c, True)
         for c in (cases or []):
             s.SetCaseSelectedForOutput(c, True)
 
@@ -489,6 +504,17 @@ def run():
         )
         assert set(dfc["load_kind"].unique()) == {"CASE"}
         assert set(perc.keys()) == {"Dead", "Live"}
+
+        # Both-streams path: passing combos AND cases extracts both kinds.
+        dfb, perb, _recb = extract_forces(
+            "synthetic_model.$et", str(out),
+            session=session,
+            combos=combos,
+            cases=["Dead"],
+        )
+        assert set(dfb["load_kind"].unique()) == {"COMBO", "CASE"}, dfb["load_kind"].unique()
+        assert set(perb.keys()) == set(combos) | {"Dead"}, set(perb.keys())
+        assert "Dead" in perb and "Live" not in perb
 
         # ---- Base (joint) reaction path --------------------------------------
         from etabs_extractor.models import BASE_COLUMNS

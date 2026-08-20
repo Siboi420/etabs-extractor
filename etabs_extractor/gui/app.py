@@ -14,7 +14,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from etabs_extractor.config import resolve_output_dir
-from etabs_extractor.gui.state import GuiSettings, parse_combos, parse_elevation
+from etabs_extractor.gui.state import GuiSettings, parse_elevation
 from etabs_extractor.gui.service import (
     build_extract_kwargs,
     build_figure_kwargs,
@@ -23,6 +23,7 @@ from etabs_extractor.gui.service import (
     sanitize_tag,
 )
 from etabs_extractor.gui.widgets.fields import DirectoryField, FileField, LabeledEntry
+from etabs_extractor.gui.widgets.load_selection import LoadSelectionField
 from etabs_extractor.gui.widgets.plot_settings import PlotSettingsFrame
 from etabs_extractor.gui.widgets.preview import PlotPreviewWindow
 
@@ -74,12 +75,11 @@ class EtabsExtractorApp(tk.Tk):
         # -- Load selection --------------------------------------------------
         load = ttk.LabelFrame(self, text="Load selection")
         load.pack(fill="x", padx=8, pady=4)
-        self.combo_field = LabeledEntry(
-            load, "Combos", "", width=50,
-        )
-        self.combo_field.pack(fill="x", padx=6, pady=3)
+        self.load_field = LoadSelectionField(load)
+        self.load_field.pack(fill="x", padx=6, pady=3)
         ttk.Label(
-            load, text="(comma/space separated; empty = all model combos)",
+            load, text="(Check active model to load combos/cases; multi-select; "
+                      "empty = all combos)",
             foreground="#777", font=("", 8),
         ).pack(anchor="w", padx=14)
         opt = ttk.Frame(load)
@@ -146,7 +146,7 @@ class EtabsExtractorApp(tk.Tk):
         s.model_path = self.model_field.get()
         s.output_dir = self.output_field.get()
         s.tag = self.tag_field.get()
-        s.combos = self.combo_field.get()
+        s.selected_combos, s.selected_cases = self.load_field.get_selected()
         s.elevation = self.elevation_field.get()
         s.only_loaded = self.only_loaded_var.get()
         s.run_analysis = self.run_analysis_var.get()
@@ -159,14 +159,14 @@ class EtabsExtractorApp(tk.Tk):
     # ---------------------------------------------------------------- actions
     def on_check_model(self) -> None:
         from etabs_extractor.gui.runner import BackgroundRunner
-        from etabs_extractor.gui.service import check_active_model
+        from etabs_extractor.gui.service import inspect_active_model
 
         self._set_log("Checking active model...")
         self.check_btn.configure(state="disabled")
 
         def _work():
             try:
-                return ("ok", check_active_model(attach=self.attach_var.get()))
+                return ("ok", inspect_active_model(attach=self.attach_var.get()))
             except Exception as exc:  # noqa: BLE001
                 return ("err", str(exc))
 
@@ -177,18 +177,29 @@ class EtabsExtractorApp(tk.Tk):
 
     def _on_check_done(self, payload):
         self.check_btn.configure(state="normal")
-        kind, value = payload if isinstance(payload, tuple) else ("ok", "")
-        if kind == "ok":
-            if value:
-                self.model_field.set(value)
-                self.model_status.set(f"Active: {value}")
-                self._set_log(f"Detected active model: {value}")
+        kind, value = payload if isinstance(payload, tuple) else ("ok", None)
+        if kind == "ok" and isinstance(value, dict):
+            model_path = value.get("model_path") or ""
+            combos = list(value.get("combos") or [])
+            cases = list(value.get("cases") or [])
+            if model_path:
+                self.model_field.set(model_path)
+                self.model_status.set(f"Active: {model_path}")
+                self._set_log(f"Detected active model: {model_path}")
             else:
                 self.model_status.set("No active model / empty filename.")
                 self._set_log("No active model filename returned.")
+            # Populate the load dropdown with the model's combos/cases.
+            self.load_field.set_items(combos, cases)
+            n_combos = len(combos)
+            n_cases = len(cases)
+            self._set_log(
+                f"Active model has {n_combos} combo(s) and {n_cases} case(s)."
+            )
         else:
-            self.model_status.set(f"Failed: {value}")
-            self._set_log(f"Check failed: {value}")
+            err = str(value) if value else "unknown error"
+            self.model_status.set(f"Failed: {err}")
+            self._set_log(f"Check failed: {err}")
 
     def on_extract(self) -> None:
         settings = self._collect_settings()

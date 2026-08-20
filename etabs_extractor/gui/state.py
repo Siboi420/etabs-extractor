@@ -22,8 +22,9 @@ class GuiSettings:
     output_dir: str = ""
     tag: str = ""
 
-    # Load selection
-    combos: str = ""            # comma/space-separated names; empty = all
+    # Load selection (multi-select checklist; empty lists = all model combos)
+    selected_combos: list[str] = field(default_factory=list)
+    selected_cases: list[str] = field(default_factory=list)
     elevation: str = ""         # empty = no elevation filter
     only_loaded: bool = False
     run_analysis: bool = False
@@ -39,6 +40,8 @@ class GuiSettings:
     fig_height: float = 8.0
     dpi: int = 800
     label_fontsize: float = 2.4
+    x_offset: float = 1.0
+    y_offset: float = 1.0
     units: str = "model"
     format: str = "png"
 
@@ -103,3 +106,101 @@ def parse_int(raw: str, default: int) -> int:
         return int(raw.strip())
     except (TypeError, ValueError):
         return default
+
+
+class _LoadItem:
+    """A single load item in the checklist: its name, kind (``combos`` or
+    ``cases``) and selected flag."""
+
+    __slots__ = ("name", "kind", "selected")
+
+    def __init__(self, name: str, kind: str, selected: bool = False) -> None:
+        self.name = name
+        self.kind = kind
+        self.selected = selected
+
+    @property
+    def display(self) -> str:
+        """The label shown in the checklist, e.g. ``(combo) ASD 1``."""
+        return f"({self.kind}) {self.name}"
+
+
+class LoadSelectionModel:
+    """Headless selection model backing the multi-select load checklist.
+
+    Holds a distinct list of combo and case items (each with a ``selected``
+    flag), a substring ``matches(query)`` filter, and ``get_selected() ->
+    (combos, cases)``.  Keeps all filtering logic pure so it is unit-testable
+    without Tk.
+    """
+
+    def __init__(
+        self,
+        combos: list[str] | None = None,
+        cases: list[str] | None = None,
+    ) -> None:
+        self._items: list[_LoadItem] = []
+        if combos:
+            self._items.extend(_LoadItem(name=n, kind="combo") for n in combos)
+        if cases:
+            self._items.extend(_LoadItem(name=n, kind="case") for n in cases)
+
+    # ------------------------------------------------------------------ rows
+    def set_items(self, combos: list[str], cases: list[str]) -> None:
+        """Replace the item list with distinct combo + case lists.
+
+        Selection flags are dropped on re-populate (a fresh model)."""
+        self._items = []
+        if combos:
+            self._items.extend(_LoadItem(name=n, kind="combo") for n in combos)
+        if cases:
+            self._items.extend(_LoadItem(name=n, kind="case") for n in cases)
+
+    def items(self):
+        """Return all items (raw, unfiltered)."""
+        return list(self._items)
+
+    @property
+    def all_combos(self) -> list[str]:
+        return [it.name for it in self._items if it.kind == "combo"]
+
+    @property
+    def all_cases(self) -> list[str]:
+        return [it.name for it in self._items if it.kind == "case"]
+
+    # ---------------------------------------------------------------- filter
+    def matches(self, query: str):
+        """Return the items whose display label matches ``query`` as a
+        case-insensitive substring.  An empty/whitespace query returns all
+        items."""
+        q = (query or "").strip().lower()
+        if not q:
+            return [it for it in self._items]
+        return [it for it in self._items if q in it.display.lower()]
+
+    # ------------------------------------------------------------ selection
+    def toggle(self, index: int, selected: bool) -> None:
+        """Set the selected flag of the item at ``index`` (into ``_items``)."""
+        if 0 <= index < len(self._items):
+            self._items[index].selected = bool(selected)
+
+    def set_selected(self, names: list[str]) -> None:
+        """Mark exactly the given names (matching combo-or-case name) selected."""
+        target = set(names)
+        for it in self._items:
+            it.selected = it.name in target
+
+    def is_selected(self, index: int) -> bool:
+        if 0 <= index < len(self._items):
+            return self._items[index].selected
+        return False
+
+    def get_selected(self) -> tuple[list[str], list[str]]:
+        """Return ``(selected_combos, selected_cases)`` from the model."""
+        combos = [it.name for it in self._items if it.kind == "combo" and it.selected]
+        cases = [it.name for it in self._items if it.kind == "case" and it.selected]
+        return combos, cases
+
+    def clear(self) -> None:
+        for it in self._items:
+            it.selected = False

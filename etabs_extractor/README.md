@@ -72,14 +72,19 @@ python -m etabs_extractor.gui
 In the window:
 
 - **Model row** — file entry + Browse (`*.EDB` / `*.et`) + **"Check active
-  model"**, which attaches to the running ETABS and fills the field via
+  model"**, which attaches to the running ETABS, fills the path field via
   `SapModel.GetModelFilename` (a cSapModel method on the model object, not
-  the File interface; no path needed).
+  the File interface; no path needed), **and** populates the load dropdown
+  with the active model's **combinations and load cases** (via
+  `get_combo_names` / `get_case_names`).
 - **Destination row** — directory entry + Browse (defaults to `ETABS_OUTPUT`).
 - **Tag row** — a filename suffix applied to every output (sanitized).
-- **Load selection** — comma-separated combo names (empty = all model
-  combos), optional `elevation`, and checkboxes for `only_loaded`,
-  `run_analysis`, and `attach` (vs launch).
+- **Load selection** — a **searchable multi-select checklist** of the active
+  model's **combos + load cases** (opened via the **Select** button / click);
+  you can search-as-you-type and tick as many combos and cases as you want.
+  An empty selection keeps the default (all model combos). Optional
+  `elevation`, and checkboxes for `only_loaded`, `run_analysis`, and `attach`
+  (vs launch).
   - The plot preview renders **one marker per distinct plan (x/y) point
     returned by the extraction**. Envelope combos (Max/Min) are collapsed to
     a single governing marker per point (largest absolute value), so they do
@@ -88,7 +93,9 @@ In the window:
     **"Only loaded supports"** is checked. For a clean plan-view of just the
     real supports, set `elevation` (e.g. `-16000`) **and** check `only_loaded`.
 - **Plot appearance** — `dynamic size` checkbox (figure follows data) with
-  width/height fields disabled while dynamic; dpi (default 800), label font
+  width/height fields disabled while dynamic; **X/Y label offsets (in)**
+  (default 1.0 in each way — reserved whitespace margins so edge point labels
+  don't clip into the axes), dpi (default 800), label font
   size (default 2.4), units (`model`/`kN-m`), format (`png`/`pdf`/`svg`); plus
   a **"Plot after extract"** checkbox.
 - **Actions** — a single **Extract** button in the bottom bar (next to
@@ -241,6 +248,8 @@ python -m etabs_extractor --model "path" --extract base --combos "ASD 1" "LRFD 1
 # Combo/case selection (same for frame and base):
 python -m etabs_extractor --model "path" --combos "LRFD 1" "ASD 1" --output out
 python -m etabs_extractor --model "path" --cases "Dead" "Live" --output out
+# Passing BOTH --combos and --cases extracts both streams together:
+python -m etabs_extractor --model "path" --combos "ASD 1" --cases "Dead" --output out
 
 # Optional element filters:
 python -m etabs_extractor --model "path" --extract frame --frames "B1" "C2" --output out
@@ -296,6 +305,7 @@ df, per_load, records = extract_forces(
     combos=None,        # default: combos only (all of them)
     cases=None,         # pass a list to extract load cases instead
     all_requested=False,# True → both combos and cases
+    # passing BOTH combos AND cases now extracts both streams together
     attach=True, launch=False, run_analysis=False,
     frames=["B1", "C2"],# optional object-name filter
     tag="KM13",        # optional filename suffix
@@ -346,12 +356,14 @@ written = plot_base_reactions(
     bdf, "plots",
     dynamic_size=False, figsize=(12, 6),   # fixed canvas (inches)
     dpi=300, label_fontsize=5,             # save resolution + label font
+    x_offset=1.0, y_offset=1.0,            # reserved edge-label margins (in)
 )
 
 # Build a figure without saving (returns a matplotlib Figure you can embed or
 # annotate; None when the load has no plottable points).
 fig = build_base_reactions_figure(
-    bdf, "ASD 1", dynamic_size=False, figsize=(12, 6)
+    bdf, "ASD 1", dynamic_size=False, figsize=(12, 6),
+    x_offset=1.0, y_offset=1.0,
 )
 
 # Standalone: read a base CSV and plot into its parent dir (no COM / model).
@@ -477,6 +489,13 @@ real-model results.
   Set `dynamic_size=False` (with a fixed `figsize`, e.g. 12×6 in) and/or a
   custom `dpi` / `label_fontsize` to override this via the CLI-independent
   plot API or the GUI's Plot Appearance frame.
+- **Label offsets reserve edge margins**: by default the figure adds `x_offset`
+  / `y_offset` (1.0 in each) of whitespace on left+right / bottom+top, and the
+  axes sit inside those margins (via `fig.subplots_adjust`), so point labels
+  near plot edges render inside the figure instead of clipping into the axes.
+  Annotations use `annotation_clip=False` / `clip_on=False` and `savefig` keeps
+  `bbox_inches="tight"`, so saved images expand to exactly fit the outermost
+  label. Set either offset to `0` to reproduce the pre-change size.
 - **Label values avoid scientific notation**: `_fmt_plain` renders ~3
   significant figures in fixed notation (``12300`` not ``1.23e+04``), so large
   kN / kN·m values read as plain numbers.

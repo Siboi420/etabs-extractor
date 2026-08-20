@@ -113,6 +113,10 @@ def _resolve_names(
     """
     if all_requested:
         return (session.get_combo_names(), session.get_case_names())
+    if cases is not None and combos is not None:
+        # Both streams explicitly requested: extract both (previously cases
+        # superseded combos).
+        return (combos, cases)
     if cases is not None:
         return (None, cases)
     # Default scope: combinations only.
@@ -301,14 +305,20 @@ def extract_forces(
         if combos_use is None and cases_use is None:
             raise ExtractionError("Nothing selected to extract (enable combos and/or cases).")
 
-        if combos_use is not None:
+        if combos_use is not None and cases_use is not None:
+            if not combos_use and not cases_use:
+                raise ExtractionError(
+                    "Nothing selected to extract (enable combos and/or cases)."
+                )
+            session.setup_select_loads(combos_use, cases_use)
+        elif combos_use is not None:
             if not combos_use:
                 raise ExtractionError(
                     "Combination list is empty; model has no load combinations "
                     "(confirm combos are defined in the ETABS model)."
                 )
             session.setup_select_combos(combos_use)
-        if cases_use is not None:
+        elif cases_use is not None:
             if not cases_use:
                 raise ExtractionError(
                     "Load-case list is empty; model has no load cases "
@@ -469,14 +479,20 @@ def extract_base_reactions(
         if combos_use is None and cases_use is None:
             raise ExtractionError("Nothing selected to extract (enable combos and/or cases).")
 
-        if combos_use is not None:
+        if combos_use is not None and cases_use is not None:
+            if not combos_use and not cases_use:
+                raise ExtractionError(
+                    "Nothing selected to extract (enable combos and/or cases)."
+                )
+            session.setup_select_loads(combos_use, cases_use)
+        elif combos_use is not None:
             if not combos_use:
                 raise ExtractionError(
                     "Combination list is empty; model has no load combinations "
                     "(confirm combos are defined in the ETABS model)."
                 )
             session.setup_select_combos(combos_use)
-        if cases_use is not None:
+        elif cases_use is not None:
             if not cases_use:
                 raise ExtractionError(
                     "Load-case list is empty; model has no load cases "

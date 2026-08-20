@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from etabs_extractor.gui.state import (
     GuiSettings,
-    parse_combos,
     parse_elevation,
 )
 from etabs_extractor.io import _sanitize_filename
@@ -20,12 +19,14 @@ from etabs_extractor.io import _sanitize_filename
 
 def build_extract_kwargs(settings: GuiSettings) -> dict:
     """Return the keyword arguments for ``extract_base_reactions``."""
-    combos = parse_combos(settings.combos)
+    combos = settings.selected_combos or None
+    cases = settings.selected_cases or None
     elevation = parse_elevation(settings.elevation) if settings.elevation.strip() else None
     return {
         "model_path": settings.model_path or None,
         "output_dir": settings.output_dir or None,
-        "combos": combos or None,          # empty -> all model combos
+        "combos": combos,          # empty/None -> all model combos
+        "cases": cases,
         "elevation": elevation,
         "only_loaded": settings.only_loaded,
         "run_analysis": settings.run_analysis,
@@ -47,6 +48,8 @@ def build_plot_kwargs(settings: GuiSettings) -> dict:
         "dynamic_size": settings.dynamic_size,
         "figsize": figsize,
         "dpi": settings.dpi,
+        "x_offset": settings.x_offset,
+        "y_offset": settings.y_offset,
         "tag": settings.tag or None,
     }
 
@@ -61,6 +64,8 @@ def build_figure_kwargs(settings: GuiSettings) -> dict:
         "label_fontsize": settings.label_fontsize,
         "dynamic_size": settings.dynamic_size,
         "figsize": figsize,
+        "x_offset": settings.x_offset,
+        "y_offset": settings.y_offset,
     }
 
 
@@ -159,15 +164,30 @@ def check_active_model(attach: bool = True, session=None) -> str:
     a test fake) is used directly.  Uses ``EtabsSession.get_model_filename``;
     no model path is required.  Returns the full model path string (may be
     empty)."""
+    return inspect_active_model(attach=attach, session=session)['model_path']
+
+
+def inspect_active_model(attach: bool = True, session=None) -> dict:
+    """Attach (or reuse) an ETABS session and return the active model's
+    inventory: ``{"model_path", "combos", "cases"}``.
+
+    When ``session`` is ``None`` a real COM session is attached (or launched
+    when ``attach`` is False); otherwise the provided duck-typed session (e.g.
+    a test fake) is used directly.  Reads ``get_model_filename`` /
+    ``get_combo_names`` / ``get_case_names``."""
     from etabs_extractor.connection import EtabsSession
 
     own = session is None
     if own:
         session = EtabsSession.connect(attach=attach, launch=not attach)
     try:
-        return session.get_model_filename(include_path=True)
+        return {
+            "model_path": str(session.get_model_filename(include_path=True)),
+            "combos": list(session.get_combo_names() or []),
+            "cases": list(session.get_case_names() or []),
+        }
     except Exception as exc:  # noqa: BLE001 - root-cause tooltip
-        raise RuntimeError(f"Could not read active model filename: {exc}") from exc
+        raise RuntimeError(f"Could not inspect active model: {exc}") from exc
     finally:
         if own:
             try:
