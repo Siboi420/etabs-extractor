@@ -71,6 +71,27 @@ def _no_point_df():
     )
 
 
+def _corner_df():
+    """A four-corner frame with distinct x **and** y, so axis-limit padding
+    is observable in both directions (the 2-point sample is x-only)."""
+    return pd.DataFrame(
+        [
+            {"point": "1", "x": 0.0, "y": 0.0, "z": 0.0,
+             "load_name": "ASD 1", "load_kind": "COMBO",
+             "F1": 10.0, "F2": 2.0, "F3": 120.0, "M1": 1.0, "M2": 3.0, "M3": 0.5},
+            {"point": "2", "x": 6000.0, "y": 0.0, "z": 0.0,
+             "load_name": "ASD 1", "load_kind": "COMBO",
+             "F1": -8.0, "F2": -1.0, "F3": 110.0, "M1": 0.0, "M2": 0.0, "M3": 0.0},
+            {"point": "3", "x": 0.0, "y": 4000.0, "z": 0.0,
+             "load_name": "ASD 1", "load_kind": "COMBO",
+             "F1": 5.0, "F2": 0.0, "F3": 130.0, "M1": 0.0, "M2": 1.0, "M3": 2.0},
+            {"point": "4", "x": 6000.0, "y": 4000.0, "z": 0.0,
+             "load_name": "ASD 1", "load_kind": "COMBO",
+             "F1": -3.0, "F2": 0.0, "F3": 140.0, "M1": 0.0, "M2": 0.0, "M3": 1.0},
+        ]
+    )
+
+
 def test_gui_imports_without_display():
     """Importing the GUI package/state/service must succeed with no display."""
     import etabs_extractor.gui.app  # noqa: F401
@@ -82,7 +103,8 @@ def test_gui_imports_without_display():
 
 def test_build_figure_fixed_size():
     df = _sample_df()
-    # Offsets default to 1.0in each way, so the base (12, 6) becomes (14, 8).
+    # Offsets no longer change the canvas: the figure is exactly the base
+    # size; the offsets are applied to the axis limits instead.
     fig = build_base_reactions_figure(
         df, "ASD 1",
         dynamic_size=False, figsize=(12, 6), label_fontsize=5,
@@ -90,15 +112,45 @@ def test_build_figure_fixed_size():
     )
     assert fig is not None, "expected a Figure for plottable data"
     w, h = fig.get_size_inches()
-    assert abs(w - 14.0) < 1e-6 and abs(h - 8.0) < 1e-6, (w, h)
+    assert abs(w - 12.0) < 1e-6 and abs(h - 6.0) < 1e-6, (w, h)
     import matplotlib.pyplot as plt
     plt.close(fig)
-    print("build_base_reactions_figure fixed figsize + offsets OK")
+    print("build_base_reactions_figure fixed figsize OK (canvas unchanged)")
+
+
+def test_offsets_expand_axis_limits_not_canvas():
+    """X/Y offsets widen the axis limits (labels stay inside the box) while
+    the canvas stays exactly the base size."""
+    df = _corner_df()
+    unpadded = build_base_reactions_figure(
+        df, "ASD 1", dynamic_size=False, figsize=(12, 6), label_fontsize=5,
+        x_offset=0, y_offset=0,
+    )
+    padded = build_base_reactions_figure(
+        df, "ASD 1", dynamic_size=False, figsize=(12, 6), label_fontsize=5,
+        x_offset=1.5, y_offset=0.5,
+    )
+    assert unpadded is not None and padded is not None
+    # Same canvas: offsets change limits, never the figure size.
+    pw, ph = padded.get_size_inches()
+    uw, uh = unpadded.get_size_inches()
+    assert pw == uw == 12.0 and ph == uh == 6.0, (pw, ph, uw, uh)
+    bx0, bx1 = unpadded.axes[0].get_xlim()
+    by0, by1 = unpadded.axes[0].get_ylim()
+    px0, px1 = padded.axes[0].get_xlim()
+    py0, py1 = padded.axes[0].get_ylim()
+    # Limits strictly wider on every side.
+    assert px0 < bx0 and px1 > bx1, (bx0, bx1, px0, px1)
+    assert py0 < by0 and py1 > by1, (by0, by1, py0, py1)
+    import matplotlib.pyplot as plt
+    plt.close(padded)
+    plt.close(unpadded)
+    print("offsets expand axis limits (canvas unchanged) OK")
 
 
 def test_build_figure_zero_offset_reproduces_base():
-    """Offsets of 0 reproduce the pre-change base size exactly."""
-    df = _sample_df()
+    """Offsets of 0 leave both the canvas and the limits at their base values."""
+    df = _corner_df()
     fig = build_base_reactions_figure(
         df, "ASD 1",
         dynamic_size=False, figsize=(12, 6), label_fontsize=5,
@@ -107,15 +159,23 @@ def test_build_figure_zero_offset_reproduces_base():
     assert fig is not None
     w, h = fig.get_size_inches()
     assert abs(w - 12.0) < 1e-6 and abs(h - 6.0) < 1e-6, (w, h)
+    ref = build_base_reactions_figure(
+        df, "ASD 1", dynamic_size=False, figsize=(12, 6), label_fontsize=5,
+        x_offset=0, y_offset=0,
+    )
+    assert ref is not None
+    assert fig.axes[0].get_xlim() == ref.axes[0].get_xlim()
+    assert fig.axes[0].get_ylim() == ref.axes[0].get_ylim()
     import matplotlib.pyplot as plt
     plt.close(fig)
-    print("build_base_reactions_figure zero offsets -> base size OK")
+    plt.close(ref)
+    print("build_base_reactions_figure zero offsets -> base limits OK")
 
 
 def test_plot_base_reactions_offset_threading():
     """Offsets thread through to the built figure; writes a non-empty PNG with
     no edge-label clipping exception."""
-    df = _sample_df()
+    df = _corner_df()
     with tempfile.TemporaryDirectory() as td:
         paths = plot_base_reactions(
             df, td, dpi=100, dynamic_size=False, figsize=(12, 6),
@@ -125,14 +185,15 @@ def test_plot_base_reactions_offset_threading():
         assert len(paths) == 1, paths
         p = paths[0]
         assert p.exists() and p.stat().st_size > 0, p
-        # Rebuild via the public figure builder to confirm size accounting.
+        # Rebuild via the public figure builder: the canvas is the fixed base
+        # and the offsets only widen the limits.
         fig = build_base_reactions_figure(
             df, "ASD 1", dynamic_size=False, figsize=(12, 6),
             x_offset=1.5, y_offset=0.5,
         )
         assert fig is not None
         w, h = fig.get_size_inches()
-        assert abs(w - 15.0) < 1e-6 and abs(h - 7.0) < 1e-6, (w, h)
+        assert abs(w - 12.0) < 1e-6 and abs(h - 6.0) < 1e-6, (w, h)
         import matplotlib.pyplot as plt
         plt.close(fig)
         print("plot_base_reactions offsets threaded OK")
@@ -143,30 +204,39 @@ def test_build_figure_dynamic_size():
     fig = build_base_reactions_figure(df, "ASD 1", dynamic_size=True)
     assert fig is not None
     w, h = fig.get_size_inches()
-    # Dynamic base canvas (>= 6x5 min) plus 2*default 1in offsets each way
-    # => final size >= 8x7.
-    assert w >= 8.0 and h >= 7.0, (w, h)
+    # Dynamic base canvas (>= 6x5 min); offsets no longer inflate it.
+    assert w >= 6.0 and h >= 5.0, (w, h)
     import matplotlib.pyplot as plt
     plt.close(fig)
-    print("build_base_reactions_figure dynamic size + offsets OK")
+    print("build_base_reactions_figure dynamic size OK")
 
 
-def test_build_figure_dynamic_offset_extends_dynamic_base():
-    """Dynamic mode: final size == _dynamic_figsize result + 2*offset each way.
-
-    We call the public figure builder and check that subtracting 2*offset
-    recovers a size the dynamic sizer would have produced (>= 6x5)."""
-    df = _sample_df()
-    fig = build_base_reactions_figure(
+def test_build_figure_dynamic_offset_limits():
+    """Dynamic mode: offsets widen the limits while the canvas equals the
+    dynamic base (offsets never inflate the figure)."""
+    df = _corner_df()
+    padded = build_base_reactions_figure(
         df, "ASD 1", dynamic_size=True, x_offset=1.5, y_offset=0.5,
     )
-    assert fig is not None
-    w, h = fig.get_size_inches()
-    base_w, base_h = w - 3.0, h - 1.0
-    assert base_w >= 6.0 and base_h >= 5.0, (base_w, base_h)
+    assert padded is not None
+    w, h = padded.get_size_inches()
+    assert w >= 6.0 and h >= 5.0, (w, h)
+    unpadded = build_base_reactions_figure(
+        df, "ASD 1", dynamic_size=True, x_offset=0, y_offset=0,
+    )
+    assert unpadded is not None
+    # Same dynamic canvas in both runs.
+    assert all(padded.get_size_inches() == unpadded.get_size_inches())
+    bx0, bx1 = unpadded.axes[0].get_xlim()
+    by0, by1 = unpadded.axes[0].get_ylim()
+    px0, px1 = padded.axes[0].get_xlim()
+    py0, py1 = padded.axes[0].get_ylim()
+    assert px0 < bx0 and px1 > bx1, (bx0, bx1, px0, px1)
+    assert py0 < by0 and py1 > by1, (by0, by1, py0, py1)
     import matplotlib.pyplot as plt
-    plt.close(fig)
-    print("build_base_reactions_figure dynamic base + offsets OK")
+    plt.close(padded)
+    plt.close(unpadded)
+    print("build_base_reactions_figure dynamic offsets -> limits OK")
 
 
 def test_build_figure_none_for_no_points():
@@ -306,15 +376,77 @@ def test_state_parsing():
         print(f"state parsing OK (rejected {str(exc)!r})")
 
 
+def test_plot_single_step_stem_and_title():
+    """A single-step frame (like a MIN/MAX split CSV) plots under a
+    step-suffixed filename and a step-augmented title; multi-step or
+    stepless frames keep legacy names."""
+    from etabs_extractor.plots import _build_title, _single_step
+
+    df = _sample_df()
+    df["step_type"] = "Min"
+    assert _single_step(df) == "Min"
+    title = _build_title(df, "ASD 1", {"length": "mm", "length_scale": 1.0})
+    assert "ASD 1 (Min)" in title, title
+    # Multi-step -> no single step (legacy naming).
+    df2 = _sample_df()
+    df2["step_type"] = ["Max", "Min"]
+    assert _single_step(df2) is None
+    # No step column -> None.
+    df3 = _sample_df()
+    assert _single_step(df3) is None
+    with tempfile.TemporaryDirectory() as td:
+        paths = plot_base_reactions(
+            df, td, dpi=100, dynamic_size=False, figsize=(6, 6),
+            load_name="ASD 1",
+        )
+        assert len(paths) == 1, paths
+        assert paths[0].name == "base_ASD_1_plan_min.png", paths[0].name
+        assert paths[0].exists() and paths[0].stat().st_size > 0, paths[0]
+    print("plot single-step stem/title OK")
+
+
+def test_write_base_step_csv():
+    """write_base_step_csv: split filename, case prefix, tag, and
+    None-on-empty (no placeholder files)."""
+    from etabs_extractor.io import write_base_step_csv
+    from etabs_extractor.models import BASE_COLUMNS, JointReactionRecord
+
+    recs = [
+        JointReactionRecord(
+            point="1", x=0.0, y=0.0, z=0.0,
+            load_name="ASD Max", load_kind="COMBO",
+            F1=1.0, F2=0.0, F3=10.0, M1=0.0, M2=0.0, M3=0.0,
+            step_type="Min",
+        ),
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        p = write_base_step_csv(recs, td, "ASD Max", load_kind="COMBO", step="Min")
+        assert p is not None
+        assert p.name == "base_combo_ASD_Max_min.csv", p.name
+        df = pd.read_csv(p, encoding="utf-8")
+        assert list(df.columns) == BASE_COLUMNS, list(df.columns)
+        assert df.iloc[0]["step_type"] == "Min"
+        # Case variant + tag suffix.
+        p2 = write_base_step_csv(recs, td, "Dead", load_kind="CASE", step="Max", tag="K1")
+        assert p2 is not None
+        assert p2.name == "base_case_Dead_max_K1.csv", p2.name
+        # Empty records -> None (no file written).
+        assert write_base_step_csv([], td, "ASD Max", step="Min") is None
+    print("write_base_step_csv OK")
+
+
 def run():
     test_gui_imports_without_display()
     test_build_figure_fixed_size()
+    test_offsets_expand_axis_limits_not_canvas()
     test_build_figure_zero_offset_reproduces_base()
     test_plot_base_reactions_offset_threading()
     test_build_figure_dynamic_size()
-    test_build_figure_dynamic_offset_extends_dynamic_base()
+    test_build_figure_dynamic_offset_limits()
     test_build_figure_none_for_no_points()
     test_plot_base_reactions_dpi_figsize()
+    test_plot_single_step_stem_and_title()
+    test_write_base_step_csv()
     test_service_extract_kwargs_mapping()
     test_load_selection_model()
     test_inspect_active_model_fake()

@@ -53,8 +53,10 @@ class PlotSettingsFrame(ttk.LabelFrame):
         self.label_font_entry = ttk.Entry(self, textvariable=self.label_font_var, width=10)
         self.label_font_entry.grid(row=4, column=1, sticky="w", padx=2)
 
-        # X / Y label-offset margins (inches).  Reserved whitespace around the
-        # plot area so edge labels do not clip into the axes.
+        # X / Y offset padding (inches).  Extra room added to the axis limits
+        # (xlim/ylim) on each side, on top of the normal auto margins, so edge
+        # point labels render INSIDE the axes box instead of the box border
+        # cutting through them.  The canvas size is unchanged.
         self.x_offset_var = tk.StringVar(value=str(self._settings.x_offset))
         self.y_offset_var = tk.StringVar(value=str(self._settings.y_offset))
         ttk.Label(self, text="X offset (in)").grid(row=5, column=0, sticky="e", padx=(8, 2))

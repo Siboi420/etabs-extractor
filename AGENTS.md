@@ -265,6 +265,9 @@ rebuild) — nothing else depends on it beyond those two console wrappers.
 - **Plot smoke (no COM, WSL):** `python -m etabs_extractor --plot-csv <dir>/all_base_reactions.csv`
   → expect a `base_<load>_plan.png` next to the CSV for each load. With
   `--tag KM13` the files become `base_<load>_plan_KM13.png`.
+  Split CSVs plot to step-suffixed figures: `--plot-csv <dir>/base_combo_ASD_Max_min.csv`
+  → `base_ASD_Max_plan_min.png` (title `ASD Max (Min)`); the `_max.csv` →
+  `base_ASD_Max_plan_max.png` (distinct file, no overwrite).
 - **pi-lens:** run diagnostics on edited files; the two known rules to respect
   are `unchecked-throwing-call-python` (int/float/open) and `python-empty-except`
   (no bare `pass`).
@@ -338,6 +341,59 @@ actually carry load — e.g. with envelope combos `ASD Max`/`LRFD Max` at
 `z=-16000` this yields the 100 loaded points that match the reference
 `KM13 Chamber 3.0.xlsx` 1-to-1.
 
+### Completed: per-load MIN/MAX step split CSVs + step-aware plotting + preview Refresh
+
+Two linked changes made the base-reaction export step-aware and the preview
+re-appliable:
+
+**Per-load MIN/MAX split CSVs (base reactions only):**
+
+- `JointReactionRecord` gains `step_type: str = ""` (`models.py`, last field so
+  the dataclass default ordering stays valid) — the ETABS `StepType` value
+  (`"Max"` / `"Min"` for envelope combos, `""` for plain loads).  It is
+  exported between `load_kind` and `F1` in `to_dict()` and in `BASE_COLUMNS`,
+  so `all_base_reactions.csv` and every base DataFrame distinguish steps.
+- `_read_point_reactions()` (`results.py`) captures `step_type=_s(StepType, i)`
+  (`StepType` was already in the unpacked `JointReact` tuple, position 4,
+  previously discarded).  New null-safe `_s(seq, i) -> str` helper mirrors `_f`.
+- New `io.write_base_step_csv(records, output_dir, load_name, load_kind,
+  step, tag=None) -> Path | None` writes `base_combo_<load>_<step>.csv` /
+  `base_case_<load>_<step>.csv` (`step` lowercased + `_sanitize_filename`, tag
+  appended last — e.g. `base_combo_ASD_Max_min_KM13.csv`); returns `None` for
+  empty records (no placeholder files).  Schema is the full `BASE_COLUMNS`.
+- `extract_base_reactions()` partitions each load's records by step via the
+  `_step_key()` helper (lowercased/stripped; only `"max"`/`"min"` match):
+  `Min` rows → `_min.csv`, `Max` rows → `_max.csv`; rows with any other step
+  (`""`, `"Step By Step"`, …) stay only in the mixed per-load file.  Split
+  files are written **in addition to** the mixed `base_combo_<load>.csv` and
+  only when non-empty.  Frame-force CSVs are unchanged (base-only scope).
+
+**Step-aware plotting (split CSVs stay plottable):**
+
+- `plots._single_step(df) -> str | None` returns the single distinct non-empty
+  `step_type` of a frame (``None`` for multi-step / stepless).  `_build_title`
+  appends it in parentheses (``ASD Max (Min)``) and `_plot_one` appends
+  ``_<step>`` (lowercased) to the figure stem before any tag, so plotting both
+  split files of one load into a directory never overwrites
+  (`base_<load>_plan_min.png` vs `base_<load>_plan_max.png`; with a tag
+  `base_<load>_plan_min_KM13.png`).  Mixed/multi-step inputs (the consolidated
+  df, `all_base_reactions.csv`, the mixed per-load CSV) keep today's names and
+  titles exactly.  `--plot-csv` / `plot_base_reactions_from_csv` / GUI "Load
+  preview" accept the split CSVs unchanged (same `BASE_COLUMNS` schema).
+
+**Preview Refresh + auto-render (`gui/widgets/preview.py`):**
+
+- A **Refresh** button next to Preview/Save re-captures the plot settings from
+  the main window (`settings_provider` — `_collect_settings` — already reads
+  the plot widgets fresh on every call) and re-renders the selected load
+  (`_refresh_settings()`), logging "Refreshed preview with current plot
+  settings."
+- `set_result()` now **auto-renders the first load** with the current settings
+  instead of leaving the canvas empty (so a new extract/CSV result shows the
+  figure immediately; changed settings are applied by Refresh/Preview).
+- `dpi`/`format` remain save-time only (the canvas is screen-resolution; `Save
+  preview image` already uses `settings.dpi` / `settings.format`).
+
 ### Completed: interactive GUI + plot-appearance params
 
 A **tkinter GUI** was added (`etabs_extractor/gui/`) covering **base
@@ -354,12 +410,14 @@ compatible, defaults unchanged):
 - `dpi: int = 800` — save resolution (replaces the hardcoded ``800`` in
   ``savefig``).
 - `label_fontsize` — already existed (default ``2.4``).
-- **`x_offset: float = 1.0` / `y_offset: float = 1.0`** — reserved whitespace
-  margins (inches) around the plot area so edge point labels do not clip into
-  the axes. Final figure size = base size + `2*x_offset` × `2*y_offset`;
-  axes positioned via `fig.subplots_adjust(left=x/W, right=1-x/W, bottom=y/H,
-  top=1-y/H)` (replaces the previous unconditional `fig.tight_layout()`). To
-  reproduce the pre-change size pass `x_offset=0, y_offset=0`.
+- **`x_offset: float = 1.0` / `y_offset: float = 1.0`** — edge-label padding
+  (inches) applied to the **axis limits**, not the canvas: the equal-aspect
+  data scale converts the inches to data units, and `xlim`/`ylim` are widened
+  by that amount on each side (on top of matplotlib's normal 5% auto
+  margins), so edge point labels render **inside** the axes box and the box
+  border never cuts through a label. The figure size stays exactly the base
+  size (dynamic or fixed); pass `x_offset=0, y_offset=0` for no extra
+  padding.
 - Threaded through `plot_base_reactions`, `plot_base_reactions_from_csv`,
   and the new `build_base_reactions_figure`.
 
@@ -373,15 +431,22 @@ when a load has no plottable points. `_plot_one` now calls it then
 (`PlotPreviewWindow`, a `tk.Toplevel`) opened manually via the `Plot preview`
 button — not embedded in the main window.
 
-The offset layout changes in `build_base_reactions_figure`:
+The offset layout in `build_base_reactions_figure`:
 
-- figure size = base + `2*x_offset` × `2*y_offset`;
-- `ax.set_aspect("equal", adjustable="datalim")` → `adjustable="box"` so
-  equal-aspect letterboxes sit inside the reserved plot area rather than
-  stretching data into the margins;
-- annotations set `annotation_clip=False` and `clip_on=False` so labels render
-  into the reserved margin; `_plot_one` keeps `bbox_inches="tight"` so saved
-  images expand to fit the outermost label.
+- figure size is exactly the base size (dynamic or fixed) — offsets never
+  inflate the canvas;
+- `fig.subplots_adjust(left=0.1, right=0.9, bottom=0.1, top=0.9)` fixes the
+  axes box, and `_pad_axis_limits()` widens `xlim`/`ylim` by the offset
+  converted from inches to data units via the equal-aspect scale, on top of
+  the default 5% auto margins — the whitespace sits **inside** the axes box,
+  so labels near the edges render inside the box instead of crossing its
+  border;
+- `ax.set_aspect("equal", adjustable="box")` keeps the data aspect true
+  while the box stays fixed (the shorter direction letterboxes inside the
+  axes);
+- annotations keep `annotation_clip=False` / `clip_on=False` as a safety
+  net; `_plot_one` keeps `bbox_inches="tight"` so saved images expand to fit
+  the outermost label.
 
 New COM touchpoint (quarantined in `connection.py`):
 `EtabsSession.get_model_filename(include_path: bool = True) -> str` — calls
@@ -412,7 +477,8 @@ GUI layout/behaviour (full detail in `service.py` / `app.py`):
   base joints are still plotted unless **only_loaded** is checked; for a clean
   plan use `elevation` + `only_loaded`.
 - **Plot settings frame**: `dynamic_size` checkbox, width/height (disabled
-  when dynamic), **X/Y label offset (in)** fields (default 1.0 each), dpi
+  when dynamic), **X/Y label offset (in)** fields (default 1.0 each — extra
+  axis-limit padding so edge labels render inside the axes box), dpi
   (default 800), label font size (default 2.4), units
   (`model`/`kN-m`), format (`png`/`pdf`/`svg`). "Plot after extract".
 - **CSV section (no ETABS)**: CSV file + Browse + "Load preview".
@@ -481,7 +547,7 @@ interactive checklist, and let **combos and cases be extracted together**:
   in `tests/test_dry_run.py`, and make the fake `_records_for` return the
   **union** of selected combos + cases (matching the real COM contract).
 - **Label offsets**: see the "Plot appearance" bullet in the GUI section above
-  for the `x_offset` / `y_offset` params and the margin layout in
+  for the `x_offset` / `y_offset` params and the axis-limit padding layout in
   `build_base_reactions_figure`.
 
 ### Completed: plan-view plotting of base reactions
@@ -520,6 +586,11 @@ interactive checklist, and let **combos and cases be extracted together**:
   `1.23e+04`.
 - CLI: `--plot` (after `--extract base`), standalone `--plot-csv` (no COM),
   and `--plot-format` (default `png`) + `--units` (default `model`).
+- **Step-aware plot naming:** a plotted subset holding exactly one distinct
+  non-empty `step_type` (e.g. a `base_combo_<load>_min.csv` read via
+  `--plot-csv`) gets `_<step>` (lowercased) in the figure stem and the step in
+  the title — `base_ASD_Max_plan_min.png` titled `ASD Max (Min)`.  Multi-step
+  / stepless inputs keep the legacy `base_<load>_plan.png` names.
 - **Filename suffix `--tag NAME`:** applies to **all** outputs (frame + base +
   plots). Every public writer/plot function takes `tag: str | None = None`
   (threaded from the CLI and from `extract_forces` / `extract_base_reactions`

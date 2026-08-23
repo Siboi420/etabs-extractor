@@ -234,6 +234,34 @@ def _f_optional(seq, i) -> "float | None":
         return None
 
 
+def _s(seq, i) -> str:
+    """Null-safe string coercion of ``seq[i]`` to ``str``.
+
+    COM output arrays may contain ``None`` / short segments for missing
+    stations; those coerce to ``""`` rather than raising (mirrors ``_f``).
+    """
+    if seq is None or i >= len(seq):
+        return ""
+    try:
+        val = seq[i]
+        if val is None:
+            return ""
+        return str(val)
+    except (TypeError, ValueError, IndexError):
+        return ""
+
+
+def _step_key(step_type: str) -> str:
+    """Normalise an ETABS StepType value for Min/Max split-file partitioning.
+
+    Returns ``"max"`` / ``"min"`` (lowercased, stripped) for envelope steps;
+    any other value (``""``, ``"Step By Step"``, ...) returns ``""`` so the
+    row stays only in the mixed per-load file.
+    """
+    key = (step_type or "").strip().lower()
+    return key if key in ("max", "min") else ""
+
+
 def _z_match(z: float, target: float, tol: float = 1.0) -> bool:
     """Return True when a coordinate ``z`` equals ``target`` within tolerance.
 
@@ -411,6 +439,7 @@ def _read_point_reactions(
                 z=z,
                 load_name=name,
                 load_kind=kind,
+                step_type=_s(StepType, i),
                 # Convert model units (N / N·mm) to exported units (kN / kN·m).
                 F1=_f(F1, i) / BASE_FORCE_SCALE,
                 F2=_f(F2, i) / BASE_FORCE_SCALE,
@@ -545,9 +574,21 @@ def extract_base_reactions(
             per_load[name] = to_base_dataframe(recs)
 
         if output_dir:
+            from .io import write_base_step_csv
+
             for name, recs in grouped.items():
                 kind = recs[0].load_kind if recs else "COMBO"
                 write_base_csv(recs, output_dir, name, load_kind=kind, tag=tag)
+                # Per-load MIN/MAX split files: partition this load's rows by
+                # ETABS StepType ("Max"/"Min"); rows with any other step stay
+                # only in the mixed per-load file.  A split file is written
+                # only when it has at least one row.
+                for step_key in ("min", "max"):
+                    split = [r for r in recs if _step_key(r.step_type) == step_key]
+                    if split:
+                        write_base_step_csv(
+                            split, output_dir, name, load_kind=kind, step=step_key, tag=tag
+                        )
             write_all_base_csv(all_records, output_dir, tag=tag)
             write_base_envelope_csv(all_records, output_dir, tag=tag)
             write_base_envelope_min_csv(all_records, output_dir, tag=tag)

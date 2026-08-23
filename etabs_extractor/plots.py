@@ -145,11 +145,12 @@ def plot_base_reactions(
         ``dynamic_size=False`` (default ``(10, 8)``).
     :param dpi: save resolution in dots-per-inch (passed to ``savefig``;
         default ``800``).
-    :param x_offset: reserved whitespace margin (inches) to the left/right of
-        the plotted data, so point labels near the plot edges do not clip into
-        the axes.  Default ``1.0``.
-    :param y_offset: reserved whitespace margin (inches) above/below the plot
-        area.  Default ``1.0``.
+    :param x_offset: edge-label padding (inches): extra room added to the x
+        axis limits on each side (on top of matplotlib's normal 5% margins),
+        so point labels near the plot edges render inside the axes box (the
+        box border never cuts through a label).  Default ``1.0``.
+    :param y_offset: edge-label padding (inches): extra room added to the y
+        axis limits on each side.  Default ``1.0``.
     :param tag: optional suffix appended to each plotted file stem (e.g.
         ``KM13`` -> ``base_<load>_plan_KM13.png``).  Absent/empty = no suffix.
     :returns: the list of written :class:`Path` objects.
@@ -288,11 +289,13 @@ def build_base_reactions_figure(
         otherwise use the fixed ``figsize`` (inches).
     :param figsize: fixed figure size in inches for ``dynamic_size=False``
         (default ``(10, 8)``).
-    :param x_offset: reserved whitespace margin (in) to the left/right of the
-        plotted data area.  Default ``1.0``; ``0`` reproduces the pre-change
-        size.
-    :param y_offset: reserved whitespace margin (in) above/below the plot
-        area.  Default ``1.0``.
+    :param x_offset: edge-label padding (inches): extra room added to the x
+        axis limits on each side (on top of matplotlib's normal 5% margins),
+        so labels near the plot edges render inside the axes box (the box
+        border never cuts through a label).  Default ``1.0``; ``0`` removes
+        the padding.
+    :param y_offset: edge-label padding (inches): extra room added to the y
+        axis limits on each side.  Default ``1.0``.
     """
     import matplotlib  # noqa: PLC0415
     import matplotlib.pyplot as plt  # noqa: PLC0415
@@ -318,10 +321,8 @@ def build_base_reactions_figure(
 
     base_size = (_dynamic_figsize(valid, len_scale) if dynamic_size
                  else (figsize or (10, 8)))
-    fig_width = base_size[0] + 2 * x_offset
-    fig_height = base_size[1] + 2 * y_offset
-    fig_size = (max(fig_width, 1.0), max(fig_height, 1.0))
-    fig, ax = plt.subplots(figsize=fig_size)
+    # The canvas is exactly the base size — offsets never inflate it.
+    fig, ax = plt.subplots(figsize=base_size)
 
     ax.scatter(valid["x"] / len_scale, valid["y"] / len_scale,
                s=20, color="tab:blue", zorder=3)
@@ -357,20 +358,60 @@ def build_base_reactions_figure(
             clip_on=False,
         )
 
-    # Reserve symmetric whitespace margins around the plot area so edge-point
-    # labels render inside the figure instead of clipping into the axes.  The
-    # axes box (in figure-fraction units) sits between these margins.
-    w, h = fig.get_size_inches()
+    # Fixed margins: the axes box always occupies the same fraction of the
+    # canvas.  Edge-label room is created by expanding the axis limits below
+    # (labels live INSIDE the axes box, so the box border never cuts through
+    # them), not by inflating the canvas.
+    fig.subplots_adjust(left=0.1, right=0.9, bottom=0.1, top=0.9)
+
+    # Widen xlim/ylim by x_offset/y_offset inches of whitespace on each edge
+    # (converted to data units via the equal-aspect scale), on top of
+    # matplotlib's normal auto margins, so labels near the plot edges render
+    # inside the axes box.
     if x_offset > 0 or y_offset > 0:
-        fig.subplots_adjust(
-            left=x_offset / w,
-            right=1 - x_offset / w,
-            bottom=y_offset / h,
-            top=1 - y_offset / h,
-        )
-    else:
-        fig.subplots_adjust(left=0.1, right=0.9, bottom=0.1, top=0.9)
+        _pad_axis_limits(ax, fig, valid, x_offset, y_offset, len_scale)
     return fig
+
+
+def _pad_axis_limits(ax, fig, df, x_offset: float, y_offset: float,
+                     len_scale: float) -> None:
+    """Expand the axes limits by ``x_offset`` / ``y_offset`` inches of
+    whitespace on each edge, **on top of** matplotlib's normal auto margins.
+
+    The offsets stay in **inches** (matching the GUI fields): the current
+    equal-aspect data scale (display units per inch of the axes box) converts
+    them to data units, then ``xlim`` / ``ylim`` are widened so the padding
+    sits *inside* the axes box.  Edge point labels therefore render inside
+    the box instead of crossing its border.
+    """
+    xs = df["x"] / len_scale
+    ys = df["y"] / len_scale
+    xmin, xmax = xs.min(), xs.max()
+    ymin, ymax = ys.min(), ys.max()
+    xspan = xmax - xmin
+    yspan = ymax - ymin
+    if not (xspan > 0 and yspan > 0):
+        # Degenerate plan (all points share an x or y); leave auto limits.
+        return
+
+    # Nominal axes box (inches) from the fixed subplots_adjust margins used in
+    # build_base_reactions_figure (left/right/top/bottom 0.1 -> box = 0.8 of
+    # the figure in each direction).
+    w, h = fig.get_size_inches()
+    box_w = w * 0.8
+    box_h = h * 0.8
+    # Equal aspect: one shared scale, set by whichever direction is tighter.
+    scale = min(box_w / xspan, box_h / yspan)  # display units per inch
+
+    pad_x = x_offset / scale if scale > 0 else 0.0
+    pad_y = y_offset / scale if scale > 0 else 0.0
+    # Keep matplotlib's default 5% auto margins and add the offset padding on
+    # top, so any positive offset strictly widens the limits vs. the
+    # unpadded baseline.
+    xmargin = 0.05 * xspan
+    ymargin = 0.05 * yspan
+    ax.set_xlim(xmin - xmargin - pad_x, xmax + xmargin + pad_x)
+    ax.set_ylim(ymin - ymargin - pad_y, ymax + ymargin + pad_y)
 
 
 def _plot_one(
@@ -404,8 +445,16 @@ def _plot_one(
         return Path()
     try:
         safe = _sanitize_filename(load_name)
-        stem = _append_tag(f"base_{safe}_plan", tag)
-        path = out_dir / f"{stem}.{fmt}"
+        stem = f"base_{safe}_plan"
+        # Step-aware naming: a subset with exactly one distinct non-empty step
+        # (e.g. a MIN/MAX split CSV) gets ``_<step>`` before any tag, so
+        # plotting both split files into one directory never overwrites
+        # (``base_<load>_plan_min.png`` vs ``base_<load>_plan_max.png``).
+        # Lowercased for the stem, matching the split CSV filenames.
+        step = _single_step(df)
+        if step:
+            stem = f"{stem}_{_sanitize_filename(step.lower())}"
+        path = out_dir / (_append_tag(stem, tag) + f".{fmt}")
         fig.savefig(path, dpi=dpi, bbox_inches="tight")
         return path
     finally:
@@ -499,17 +548,45 @@ def _aggregate_maxabs(df, comps: Sequence[str]):
 
 
 def _build_title(df, load_name: str, units_def: dict) -> str:
-    """Build a default figure title showing load name plus a shared z (if any)."""
+    """Build a default figure title showing load name plus a shared z (if any).
+
+    When the frame holds exactly one distinct non-empty ``step_type`` (e.g. a
+    MIN/MAX split CSV loaded via ``--plot-csv``), the step is appended in
+    parentheses (``ASD Max (Min)``)."""
+    step = _single_step(df)
+    base = f"{load_name} ({step})" if step else load_name
     z_vals = df["z"].dropna().unique() if "z" in df.columns else []
     if len(z_vals) == 1:
         z = z_vals[0]
         len_unit = str(units_def["length"])
         len_scale = _scale(units_def, "length_scale")
         try:
-            return f"{load_name}  (z = {float(z) / len_scale:g} {len_unit})"
+            return f"{base}  (z = {float(z) / len_scale:g} {len_unit})"
         except (TypeError, ValueError):
-            return load_name
-    return load_name
+            return base
+    return base
+
+
+def _single_step(df) -> str | None:
+    """Return the single distinct non-empty ``step_type`` value of ``df``.
+
+    Makes plotting step-aware for the per-load MIN/MAX split CSVs: a subset
+    holding exactly one step (e.g. a ``base_combo_<load>_min.csv`` read by
+    ``plot_base_reactions_from_csv`` / ``--plot-csv``) gets the step in the
+    figure title and filename stem.  Returns ``None`` for multi-step or
+    stepless frames (legacy behavior, unchanged filenames)."""
+    if "step_type" not in df.columns:
+        return None
+    steps: set[str] = set()
+    for v in df["step_type"].tolist():
+        if _isna(v):
+            continue
+        s = str(v).strip()
+        if s:
+            steps.add(s)
+    if len(steps) == 1:
+        return next(iter(steps))
+    return None
 
 
 def _format_label(row, comps: Sequence[str], units_def: dict) -> str:

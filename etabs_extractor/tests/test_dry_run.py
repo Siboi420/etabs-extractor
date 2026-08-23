@@ -184,8 +184,8 @@ class _FakeJointReact:
             obj.append(Name)
             elm.append(Name)
             lc.append(r["load"])
-            st.append("")
-            sn.append(0)
+            st.append(r.get("step", ""))
+            sn.append(r.get("stepnum", 0))
             f1.append(r["F1"]); f2.append(r["F2"]); f3.append(r["F3"])
             m1.append(r["M1"]); m2.append(r["M2"]); m3.append(r["M3"])
         Obj[:] = obj; Elm[:] = elm; LoadCase[:] = lc
@@ -397,23 +397,30 @@ def _build_frame_synthetic():
 
 # Synthetic per-point reactions (fabricated; pipeline test only).  ``1/2`` are
 # combos-sourced, ``3`` also has a Dead case to exercise the CASE stream.
+# ``ASD 1`` is an envelope-style combo: each point carries one ``Max`` and one
+# ``Min`` step row (StepType threaded through the fake as ``r["step"]``);
+# ``LRFD 1`` and the ``Dead`` case are plain loads (no step).
 _REACT_BY_POINT = {
     "1": [
-        {"load": "ASD 1", "F1": 10.0, "F2": 2.0, "F3": 120.0, "M1": 1.0, "M2": 3.0, "M3": 0.5},
+        {"load": "ASD 1", "step": "Max", "F1": 10.0, "F2": 2.0, "F3": 120.0, "M1": 1.0, "M2": 3.0, "M3": 0.5},
+        {"load": "ASD 1", "step": "Min", "F1": -4.0, "F2": -1.0, "F3": 200.0, "M1": 0.2, "M2": -2.0, "M3": 0.1},
         {"load": "LRFD 1", "F1": 15.0, "F2": 3.0, "F3": 180.0, "M1": 1.5, "M2": 4.0, "M3": 0.8},
         {"load": "Dead", "F1": 5.0, "F2": 1.0, "F3": 60.0, "M1": 0.5, "M2": 1.5, "M3": 0.2},
     ],
     "2": [
-        {"load": "ASD 1", "F1": -8.0, "F2": -1.0, "F3": 110.0, "M1": 0.0, "M2": 0.0, "M3": 0.0},
+        {"load": "ASD 1", "step": "Max", "F1": -8.0, "F2": -1.0, "F3": 110.0, "M1": 0.0, "M2": 0.0, "M3": 0.0},
+        {"load": "ASD 1", "step": "Min", "F1": 2.0, "F2": 0.5, "F3": 90.0, "M1": 0.0, "M2": 0.0, "M3": 0.0},
         {"load": "LRFD 1", "F1": -12.0, "F2": -1.5, "F3": 165.0, "M1": 0.0, "M2": 0.0, "M3": 0.0},
     ],
     "3": [
-        {"load": "ASD 1", "F1": 3.0, "F2": 4.0, "F3": 80.0, "M1": 2.0, "M2": 1.0, "M3": 0.0},
+        {"load": "ASD 1", "step": "Max", "F1": 3.0, "F2": 4.0, "F3": 80.0, "M1": 2.0, "M2": 1.0, "M3": 0.0},
+        {"load": "ASD 1", "step": "Min", "F1": -1.0, "F2": -2.0, "F3": 50.0, "M1": 0.5, "M2": -0.5, "M3": 0.0},
         {"load": "Dead", "F1": 1.5, "F2": 2.0, "F3": 40.0, "M1": 1.0, "M2": 0.5, "M3": 0.0},
     ],
     # Point 4: an unrestrained/released support carrying no load at all.
     "4": [
-        {"load": "ASD 1", "F1": 0.0, "F2": 0.0, "F3": 0.0, "M1": 0.0, "M2": 0.0, "M3": 0.0},
+        {"load": "ASD 1", "step": "Max", "F1": 0.0, "F2": 0.0, "F3": 0.0, "M1": 0.0, "M2": 0.0, "M3": 0.0},
+        {"load": "ASD 1", "step": "Min", "F1": 0.0, "F2": 0.0, "F3": 0.0, "M1": 0.0, "M2": 0.0, "M3": 0.0},
         {"load": "LRFD 1", "F1": 0.0, "F2": 0.0, "F3": 0.0, "M1": 0.0, "M2": 0.0, "M3": 0.0},
     ],
 }
@@ -553,14 +560,54 @@ def run():
         assert list(bcsv.columns) == BASE_COLUMNS, "base CSV column mismatch"
         assert len(bcsv) == expected_reaction_rows, (len(bcsv), expected_reaction_rows)
 
-        # Per-load base CSV files.
+        # Per-load base CSV files (mixed, non-step files only).
         base_combo_files = [
-            f for f in os.listdir(out) if f.startswith("base_combo_")
+            f for f in os.listdir(out)
+            if f.startswith("base_combo_")
+            and not f.endswith("_min.csv") and not f.endswith("_max.csv")
         ]
         assert len(base_combo_files) == len(combos), base_combo_files
         for c in combos:
             safe = c.replace(" ", "_")
             assert (out / f"base_combo_{safe}.csv").exists(), safe
+
+        # Per-load MIN/MAX split files: ASD 1 is an envelope-style combo with
+        # Max+Min steps -> both split files written; LRFD 1 is plain -> none.
+        asd_safe = "ASD_1"
+        asd_min_csv = out / f"base_combo_{asd_safe}_min.csv"
+        asd_max_csv = out / f"base_combo_{asd_safe}_max.csv"
+        assert asd_min_csv.exists(), "ASD 1 _min split not written"
+        assert asd_max_csv.exists(), "ASD 1 _max split not written"
+        assert not (out / "base_combo_LRFD_1_min.csv").exists(), \
+            "LRFD 1 has no steps; _min must not be written"
+        assert not (out / "base_combo_LRFD_1_max.csv").exists(), \
+            "LRFD 1 has no steps; _max must not be written"
+
+        # Split files keep the full BASE_COLUMNS schema (incl. step_type) and
+        # their row counts sum to the mixed per-load file (nothing lost, and
+        # the files stay plottable via --plot-csv / plot_base_reactions_from_csv).
+        asd_mixed = pd.read_csv(out / f"base_combo_{asd_safe}.csv", encoding="utf-8")
+        asd_min = pd.read_csv(asd_min_csv, encoding="utf-8")
+        asd_max = pd.read_csv(asd_max_csv, encoding="utf-8")
+        assert list(asd_min.columns) == BASE_COLUMNS, "split _min column mismatch"
+        assert list(asd_max.columns) == BASE_COLUMNS, "split _max column mismatch"
+        assert len(asd_min) + len(asd_max) == len(asd_mixed), \
+            (len(asd_min), len(asd_max), len(asd_mixed))
+        assert set(asd_min["step_type"].unique()) == {"Min"}, \
+            set(asd_min["step_type"].unique())
+        assert set(asd_max["step_type"].unique()) == {"Max"}, \
+            set(asd_max["step_type"].unique())
+        # Split content sanity: point 1's ASD 1 Min row carries F3=200 (N)
+        # -> 0.200 kN after the N->kN conversion.
+        pt1_min = asd_min[asd_min["point"].astype(str) == "1"]
+        assert len(pt1_min) == 1, pt1_min
+        assert abs(float(pt1_min.iloc[0]["F3"]) - 0.200) < 1e-9
+        # The consolidated CSV distinguishes Max/Min rows (plain loads have an
+        # empty step, read back by pandas as NaN).
+        step_vals = set(bcsv["step_type"].fillna("").astype(str).unique())
+        assert step_vals <= {"Max", "Min", ""}, step_vals
+        assert "Max" in step_vals
+        assert "Min" in step_vals
 
         # Base envelope summary exists.
         benv_csv = out / "base_envelope_summary.csv"
@@ -590,6 +637,20 @@ def run():
         # Across ASD 1 (F3=120) and LRFD 1 (F3=180): max F3 in kN is 0.180.
         assert pt1_all["F3_max"].max() >= 0.180
 
+        # Base case-stream: a plain case load -> base_case_Dead.csv with NO
+        # split files (no Max/Min steps in the data).  Runs AFTER the envelope
+        # checks above because it re-extracts into the same output dir (which
+        # would otherwise overwrite base_envelope_*.csv with Dead-only rows).
+        bc_df, _bc_per, _bc_recs = extract_base_reactions(
+            "synthetic_model.$et", str(out),
+            session=session,
+            cases=["Dead"],
+        )
+        assert set(bc_df["load_kind"].unique()) == {"CASE"}
+        assert (out / "base_case_Dead.csv").exists()
+        assert not (out / "base_case_Dead_min.csv").exists()
+        assert not (out / "base_case_Dead_max.csv").exists()
+
         # Tagged base run: every base CSV and figure filename carries the suffix.
         tagged_dir = out / "tagged"
         _, _tp, _tr = extract_base_reactions(
@@ -602,12 +663,16 @@ def run():
         assert (tagged_dir / "base_envelope_min_KH13.csv").exists()
         assert (tagged_dir / "base_envelope_max_KH13.csv").exists()
         assert (tagged_dir / "base_envelope_summary_KH13.csv").exists()
+        assert (tagged_dir / f"base_combo_{asd_safe}_min_KH13.csv").exists()
+        assert (tagged_dir / f"base_combo_{asd_safe}_max_KH13.csv").exists()
         for c in combos:
             safe = c.replace(" ", "_")
             assert (tagged_dir / f"base_combo_{safe}_KH13.csv").exists(), c
         # Untagged legacy names must NOT appear alongside the tagged ones.
         assert not (tagged_dir / "all_base_reactions.csv").exists()
         assert not (tagged_dir / "base_envelope_min.csv").exists()
+        assert not (tagged_dir / "base_combo_ASD_1_min.csv").exists()
+        assert not (tagged_dir / "base_combo_ASD_1_max.csv").exists()
         # A whitespace-only tag behaves as no tag (no suffix).
         ws_dir = out / "wstag"
         _, _, _r2 = extract_base_reactions(
@@ -739,6 +804,23 @@ def run():
         for c in combos:
             safe = c.replace(" ", "_")
             assert (out / f"base_{safe}_plan.png").exists()
+
+        # ---- Plot compatibility with the new MIN/MAX split CSVs ------------
+        # Each split file plots to a step-suffixed figure, so plotting both
+        # files of one load into the same directory never overwrites
+        # (base_ASD_1_plan_min.png vs base_ASD_1_plan_max.png).
+        split_plot_dir = out / "split_plots"
+        pmin = plot_base_reactions_from_csv(asd_min_csv, split_plot_dir)
+        pmax = plot_base_reactions_from_csv(asd_max_csv, split_plot_dir)
+        assert len(pmin) == 1 and len(pmax) == 1, (pmin, pmax)
+        p_min_fig = split_plot_dir / "base_ASD_1_plan_min.png"
+        p_max_fig = split_plot_dir / "base_ASD_1_plan_max.png"
+        assert p_min_fig.exists() and p_min_fig.stat().st_size > 0, p_min_fig
+        assert p_max_fig.exists() and p_max_fig.stat().st_size > 0, p_max_fig
+        # Mixed (multi-step) inputs keep the legacy figure names.
+        pmixed = plot_base_reactions_from_csv(
+            out / f"base_combo_{asd_safe}.csv", split_plot_dir)
+        assert (split_plot_dir / "base_ASD_1_plan.png") in pmixed, pmixed
 
         # NaN-coordinate rows must be skipped, never crash.  Build a fixture
         # DataFrame carrying one point with x=None (kept as NaN) alongside a

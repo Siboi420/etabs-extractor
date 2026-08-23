@@ -157,6 +157,9 @@ class JointReactionRecord:
     M2: float             # reaction moment about global Y (kN·m)
     M3: float             # reaction moment about global Z (kN·m)
 
+    # ETABS result step ("Max"/"Min" for envelope combos, "" for plain loads)
+    step_type: str = ""
+
     def to_dict(self) -> dict:
         """Return an ordered dict suitable for CSV/DataFrame rows."""
         d = asdict(self)
@@ -167,6 +170,7 @@ class JointReactionRecord:
             "z": d["z"],
             "load_name": d["load_name"],
             "load_kind": d["load_kind"],
+            "step_type": d["step_type"],
             "F1": d["F1"],
             "F2": d["F2"],
             "F3": d["F3"],
@@ -184,6 +188,7 @@ BASE_COLUMNS = [
     "z",
     "load_name",
     "load_kind",
+    "step_type",
     "F1",
     "F2",
     "F3",

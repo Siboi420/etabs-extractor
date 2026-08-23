@@ -143,6 +143,7 @@ class PlotPreviewWindow(tk.Toplevel):
         self.load_combo.pack(side="left", padx=6)
         self.load_combo.bind("<<ComboboxSelected>>", lambda e: self._render_current())
         ttk.Button(top, text="Preview", command=self._render_current).pack(side="left", padx=4)
+        ttk.Button(top, text="Refresh", command=self._refresh_settings).pack(side="left", padx=4)
         ttk.Button(top, text="Save preview image", command=self._save_preview).pack(side="left", padx=4)
 
         self.preview = PlotPreviewFrame(self, width=660, height=440)
@@ -150,14 +151,27 @@ class PlotPreviewWindow(tk.Toplevel):
 
     # ------------------------------------------------------------------ api
     def set_result(self, result: dict) -> None:
-        """Set the extraction/load result dict and populate the load combo."""
+        """Set the extraction/load result dict, populate the load combo, and
+        auto-render the first load with the current plot settings."""
         self._result = result or {}
         self._per_load = self._result.get("per_load") or {}
         load_names = self._result.get("load_names") or []
         self.load_combo.configure(values=load_names)
         if load_names:
             self.load_combo.current(0)
-        self.preview.clear()
+            # Apply the current plot appearance immediately instead of leaving
+            # the canvas empty until the user presses Preview/Refresh.
+            self._render_current()
+        else:
+            self.preview.clear()
+
+    def _refresh_settings(self) -> None:
+        """Re-capture the plot settings from the main window and re-render the
+        currently selected load (the ``settings_provider`` reads the main
+        window's plot widgets fresh on every call)."""
+        if self._log:
+            self._log("Refreshed preview with current plot settings.")
+        self._render_current()
 
     def is_alive(self) -> bool:
         """True while the Toplevel still exists on screen."""

@@ -94,8 +94,8 @@ In the window:
     real supports, set `elevation` (e.g. `-16000`) **and** check `only_loaded`.
 - **Plot appearance** — `dynamic size` checkbox (figure follows data) with
   width/height fields disabled while dynamic; **X/Y label offsets (in)**
-  (default 1.0 in each way — reserved whitespace margins so edge point labels
-  don't clip into the axes), dpi (default 800), label font
+  (default 1.0 in each way — extra axis-limit padding so edge point labels
+  render inside the axes box), dpi (default 800), label font
   size (default 2.4), units (`model`/`kN-m`), format (`png`/`pdf`/`svg`); plus
   a **"Plot after extract"** checkbox.
 - **Actions** — a single **Extract** button in the bottom bar (next to
@@ -104,9 +104,13 @@ In the window:
 - **Plot from existing CSV (no ETABS)** — pick a base CSV, "Load preview".
 - **Plot preview (pop-up window, manual)** — a separate ``Plot preview`` button
   opens the preview in its own pop-up window (load dropdown + embedded
-  matplotlib canvas + ``Preview`` / ``Save preview image`` buttons); it is
-  shared by both extract and CSV results.  It is **not** auto-opened after
-  Extract / Load-preview — only the ``Plot preview`` button opens it.
+  matplotlib canvas + ``Preview`` / ``Refresh`` / ``Save preview image``
+  buttons); it is shared by both extract and CSV results.  It is **not**
+  auto-opened after Extract / Load-preview — only the ``Plot preview`` button
+  opens it.  When a result is loaded the **first load renders automatically**
+  with the current plot settings; the **Refresh** button re-captures the
+  appearance settings from the main window (font size, units, offsets, …) and
+  re-renders the selected load.
 
 Extract / Load preview run in a **background thread** (COM is initialised in
 the worker via comtypes `CoInitialize()`/`CoUninitialize()` — required on
@@ -178,11 +182,13 @@ takes the default (no suffix). Example with `--tag KM13`:
 | `all_forces.csv` | `all_forces_KM13.csv` |
 | `envelope_summary.csv` | `envelope_summary_KM13.csv` |
 | `base_combo_<load>.csv` / `base_case_<load>.csv` | `base_combo_<load>_KM13.csv` / `base_case_<load>_KM13.csv` |
+| `base_combo_<load>_min.csv` / `_max.csv` (envelope loads) | `base_combo_<load>_min_KM13.csv` / `_max_KM13.csv` |
 | `all_base_reactions.csv` | `all_base_reactions_KM13.csv` |
 | `base_envelope_summary.csv` | `base_envelope_summary_KM13.csv` |
 | `base_envelope_min.csv` | `base_envelope_min_KM13.csv` |
 | `base_envelope_max.csv` | `base_envelope_max_KM13.csv` |
 | `base_<load>_plan.<fmt>` | `base_<load>_plan_KM13.<fmt>` |
+| `base_<load>_plan_min.<fmt>` / `_max.<fmt>` (single-step CSV) | `base_<load>_plan_min_KM13.<fmt>` / `_max_KM13.<fmt>` |
 
 ## What it does
 
@@ -356,7 +362,7 @@ written = plot_base_reactions(
     bdf, "plots",
     dynamic_size=False, figsize=(12, 6),   # fixed canvas (inches)
     dpi=300, label_fontsize=5,             # save resolution + label font
-    x_offset=1.0, y_offset=1.0,            # reserved edge-label margins (in)
+    x_offset=1.0, y_offset=1.0,            # edge-label padding on the axis limits (in)
 )
 
 # Build a figure without saving (returns a matplotlib Figure you can embed or
@@ -404,7 +410,16 @@ When `output_dir` is given:
 **Base (`--extract base`):**
 
 - `base_combo_<name>.csv` / `base_case_<name>.csv` — one per load name.
-- `all_base_reactions.csv` — all rows concatenated.
+- `base_combo_<name>_min.csv` / `base_combo_<name>_max.csv` — for loads with
+  envelope **Max/Min steps**, the same per-load rows split by ETABS `StepType`
+  into a MIN file and a MAX file (case loads get `base_case_<name>_min/max.csv`).
+  Written **in addition to** the mixed per-load file, only when non-empty;
+  rows with any other step stay in the mixed file only.  Each carries a
+  `step_type` column (`Min` / `Max`) and the full `BASE_COLUMNS` schema, so
+  they remain directly plottable via `--plot-csv` / "Load preview".
+- `all_base_reactions.csv` — all rows concatenated, with a `step_type` column
+  (`Max` / `Min` for envelope rows, empty for plain loads) so steps can be
+  filtered in any spreadsheet.
 - `base_envelope_summary.csv` — min/max of each reaction component per
   (point, load name).
 - `base_envelope_min.csv` — per (point, load name): the **minimum** of each
@@ -422,6 +437,12 @@ filtering for dot-plotting is done downstream.
   its `Fz, M2, M3` values (default components; forces in kN and moments in
   kN·m under both `--units` systems, coordinates in mm by default or m with
   `--units kN-m`). `--plot-format` selects the extension (default `png`).
+- **Step-aware naming:** plotting a subset that holds exactly one distinct
+  `step_type` (e.g. `--plot-csv` on `base_combo_<load>_min.csv`) produces
+  `base_<load>_plan_min.<fmt>` (title `ASD Max (Min)`); the `_max.csv` →
+  `base_<load>_plan_max.<fmt>`. The two files of one load never overwrite each
+  other. Mixed / multi-step inputs (`all_base_reactions.csv`, the mixed
+  per-load CSV) keep the legacy `base_<load>_plan.<fmt>` names.
 
 ## Testing / verification
 
@@ -489,13 +510,16 @@ real-model results.
   Set `dynamic_size=False` (with a fixed `figsize`, e.g. 12×6 in) and/or a
   custom `dpi` / `label_fontsize` to override this via the CLI-independent
   plot API or the GUI's Plot Appearance frame.
-- **Label offsets reserve edge margins**: by default the figure adds `x_offset`
-  / `y_offset` (1.0 in each) of whitespace on left+right / bottom+top, and the
-  axes sit inside those margins (via `fig.subplots_adjust`), so point labels
-  near plot edges render inside the figure instead of clipping into the axes.
-  Annotations use `annotation_clip=False` / `clip_on=False` and `savefig` keeps
-  `bbox_inches="tight"`, so saved images expand to exactly fit the outermost
-  label. Set either offset to `0` to reproduce the pre-change size.
+- **Label offsets pad the axis limits**: by default `x_offset` / `y_offset`
+  (1.0 in each) widen the `xlim`/`ylim` — the inches are converted to data
+  units via the equal-aspect scale, on top of matplotlib's normal 5% auto
+  margins — so the whitespace sits **inside** the axes box and edge point
+  labels render inside the box instead of the box border cutting through
+  them. The canvas is never inflated: the figure size is exactly the base
+  size (dynamic or fixed). Annotations keep `annotation_clip=False` /
+  `clip_on=False` as a safety net and `savefig` keeps `bbox_inches="tight"`,
+  so saved images expand to exactly fit the outermost label. Set either
+  offset to `0` to remove the extra padding.
 - **Label values avoid scientific notation**: `_fmt_plain` renders ~3
   significant figures in fixed notation (``12300`` not ``1.23e+04``), so large
   kN / kN·m values read as plain numbers.

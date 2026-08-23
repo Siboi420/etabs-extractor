@@ -155,6 +155,43 @@ def write_all_base_csv(
     return path
 
 
+def write_base_step_csv(
+    records: Iterable[JointReactionRecord],
+    output_dir: str | os.PathLike,
+    load_name: str,
+    load_kind: str = "COMBO",
+    step: str = "",
+    tag: str | None = None,
+) -> Path | None:
+    """Write the records of one ETABS result step (``Min``/``Max``) of a
+    load to ``base_combo_<load>_<step>.csv`` / ``base_case_<load>_<step>.csv``.
+
+    ``step`` is lowercased and filesystem-sanitized; a ``tag`` is appended to
+    the stem via :func:`_append_tag` (e.g. ``base_combo_ASD_Max_min_KM13.csv``).
+    Returns ``None`` when ``records`` is empty (no split file written).  The
+    written schema is the full :data:`BASE_COLUMNS` (including ``step_type``),
+    so the file stays usable with ``plot_base_reactions_from_csv`` / ``--plot-csv``.
+    """
+    recs = list(records)
+    if not recs:
+        return None
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rows = [r.to_dict() for r in recs]
+    prefix = "combo" if load_kind.upper() == "COMBO" else "case"
+    stem = f"base_{prefix}_{_sanitize_filename(load_name)}"
+    step_part = _sanitize_filename(step.lower()) if step else ""
+    if step_part:
+        stem = f"{stem}_{step_part}"
+    fname = _append_tag(stem, tag) + ".csv"
+    path = out_dir / fname
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=BASE_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
 def write_base_envelope_csv(
     records: Iterable[JointReactionRecord],
     output_dir: str | os.PathLike,
