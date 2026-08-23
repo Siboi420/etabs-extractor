@@ -80,7 +80,7 @@ pyrightconfig.json
   never forces COM. `EtabsSession` exposes a small, **duck-typed** surface
   (`frame_force`, `joint_react`, `get_frame_names`, `get_combo_names`,
   `get_case_names`, `get_point_names`, `get_point_coords`,
-  `get_section_for_frame`, `setup_select_combos/cases`, `open_model`,
+  `get_section_for_frame`, `setup_select_loads`, `open_model`,
   `run_analysis`) so tests substitute a fake.
 - **`results.py` orchestrates against the duck-typed surface**, never
   against COM directly. Same code path runs on a live session or the test
@@ -94,8 +94,8 @@ pyrightconfig.json
 # Frame extraction (--extract frame, default)
 CLI/API -> results.extract_forces()
         -> _connect_session()        (resolve model, get EtabsSession)
-        -> _resolve_names()          (combos+/-cases)
-        -> setup_select_*()          (enable outputs in ETABS)
+        -> _extract() driver         (shared by every ExtractKind)
+           -> _select_loads() -> setup_select_loads()  (enable outputs in ETABS)
         -> get_frame_names()
         -> _read_frame_forces() per frame  (session.frame_force)
         -> FrameForceRecord[]        (one per station)
@@ -104,7 +104,8 @@ CLI/API -> results.extract_forces()
 
 # Base-reaction extraction (--extract base)
 CLI/API -> results.extract_base_reactions()
-        -> _connect_session() _resolve_names() setup_select_*()  (same as frames)
+        -> _connect_session() -> _extract() driver  (same as frames:
+           _select_loads() -> setup_select_loads())
         -> session.get_point_names()            (all point objects)
         -> per point: get_point_coords() -> (x,y,z); session.joint_react()
         -> JointReactionRecord[]        (one per load per point)
@@ -289,13 +290,27 @@ The architecture is designed to make this additive. The pattern:
    `FrameForceRecord` / `JointReactionRecord` (with its own `to_dict()` +
    `COLUMNS` if the schema differs, e.g. walls have different axes/forces).
 3. **New read function** → add `_read_<type>_forces()` in `results.py`
-   beside `_read_frame_forces()` / `_read_point_reactions()`.
-4. **I/O** → `io.py` has writers for both the frame (`write_csv`,
+   beside `_read_frame_forces()` / `_read_point_reactions()` — signature
+   `(session, name, combos, cases) -> list[Record]`.
+4. **Register the kind** → build an `ExtractKind` in `results.py` (label,
+   `get_names`, `read`, `to_df`, `write`). The shared driver
+   `_extract(kind, ...)` already owns connection, load selection
+   (`_select_loads` → `setup_select_loads`), name filtering, per-item
+   reads, optional `post_filter`, DataFrame assembly and teardown; the
+   kind supplies only what differs. Frame forces use the module-level
+   `_FRAME_KIND`; per-call kinds capture extra context via closures (e.g.
+   `_make_point_reader(elevation)`).
+5. **I/O** → `io.py` has writers for both the frame (`write_csv`,
    `write_all_forces_csv`, `write_envelope_csv`) and base-reaction schemas
    (`write_base_csv`, `write_all_base_csv`, `write_base_envelope_csv`, plus the
    split `write_base_envelope_min_csv` / `write_base_envelope_max_csv`). The
    writers are concrete per schema (each takes its own `*_COLUMNS` + rows);
-   add new writers beside them rather than duplicating frame logic by copy.
+   add new writers beside them rather than duplicating frame logic by copy,
+   then point the kind's `write` at a small per-kind writer (like
+   `_write_frame_csvs` / `_write_base_csvs`).
+6. **Public wrapper** → `extract_<type>` becomes a thin function that builds
+   the kind and calls `_extract(...)` (see `extract_forces` /
+   `extract_base_reactions`); the driver and the other kinds are untouched.
 
 ### Completed: base reactions (already implemented)
 
@@ -539,11 +554,12 @@ interactive checklist, and let **combos and cases be extracted together**:
   and `--cases` together now extracts both.
 - **`EtabsSession.setup_select_loads(combos, cases)`** (COM, `connection.py`):
   calls `DeselectAllCasesAndCombosForOutput()` **once**, then selects the given
-  combos and cases together. `extract_forces` / `extract_base_reactions` now
-  call it when both streams are requested (the old separate
-  `setup_select_combos` then `setup_select_cases` calls each `DeselectAll...`
-  the other, so they would clobber each other). `setup_select_combos` /
-  `setup_select_cases` are kept for compatibility. Mirror it on `_FakeSession`
+  combos and cases together. It is now the **only** selection method:
+  `results._select_loads` routes every branch (combos-only / cases-only /
+  both) through it, passing an empty list for the skipped stream — the old
+  `setup_select_combos` / `setup_select_cases` were removed (calling one
+  then the other would have each `DeselectAll...` the other's selection).
+  Mirror it on `_FakeSession`
   in `tests/test_dry_run.py`, and make the fake `_records_for` return the
   **union** of selected combos + cases (matching the real COM contract).
 - **Label offsets**: see the "Plot appearance" bullet in the GUI section above

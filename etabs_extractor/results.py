@@ -14,10 +14,27 @@ against a live ETABS instance and against the synthetic test stub.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Iterable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Callable
 
 from .config import resolve_model_path, to_windows_path
-from .models import FrameForceRecord, JointReactionRecord
+from .io import (
+    write_all_base_csv,
+    write_all_forces_csv,
+    write_base_csv,
+    write_base_envelope_csv,
+    write_base_envelope_max_csv,
+    write_base_envelope_min_csv,
+    write_base_step_csv,
+    write_csv,
+    write_envelope_csv,
+)
+from .models import (
+    FrameForceRecord,
+    JointReactionRecord,
+    to_base_dataframe,
+    to_dataframe,
+)
 
 if TYPE_CHECKING:
     from .connection import EtabsSession
@@ -90,10 +107,6 @@ def _release_helper(session: "EtabsSession | None") -> None:
         logger.debug("Could not release ETABS session helper: %s", exc)
 
 
-def _records_where(records: Iterable[FrameForceRecord], load_name: str) -> list[FrameForceRecord]:
-    return [r for r in records if r.load_name == load_name]
-
-
 def _resolve_names(
     *,
     combos: list[str] | None,
@@ -125,18 +138,162 @@ def _resolve_names(
     return (combos, None)
 
 
+@dataclass(frozen=True)
+class ExtractKind:
+    """Everything that differs between extraction kinds (frame vs base).
+
+    The shared driver :func:`_extract` owns connection, load selection, name
+    filtering, reading, assembly and teardown; a kind supplies only the parts
+    that genuinely differ.  Adding a new result type (e.g. wall forces) =
+    add one ``ExtractKind`` (a reader + a CSV writer) and a thin public
+    wrapper — ``_extract`` is untouched.
+    """
+
+    label: str            # used in the "no <label> objects" error message
+    get_names: Callable   # (session) -> list[str]
+    read: Callable        # (session, name, combos, cases) -> list[record]
+    to_df: Callable       # (records) -> DataFrame
+    write: Callable       # (records, grouped, output_dir, tag) -> None
+
+
+def _select_loads(
+    session: "EtabsSession",
+    *,
+    combos: list[str] | None,
+    cases: list[str] | None,
+    all_requested: bool,
+) -> tuple[list[str] | None, list[str] | None]:
+    """Resolve which combos/cases to extract and select them for output.
+
+    Keeps the old per-stream dispatch semantics (combos-only / cases-only /
+    both, with the same empty-list errors) but routes every branch through
+    ``setup_select_loads`` — a single ``DeselectAll`` + both selections — so
+    there is one COM code path.  Returns the resolved ``(combos_use,
+    cases_use)``.
+    """
+    combos_use, cases_use = _resolve_names(
+        combos=combos,
+        cases=cases,
+        session=session,
+        all_requested=all_requested,
+    )
+
+    if combos_use is None and cases_use is None:
+        raise ExtractionError("Nothing selected to extract (enable combos and/or cases).")
+    if combos_use is not None and cases_use is not None:
+        if not combos_use and not cases_use:
+            raise ExtractionError(
+                "Nothing selected to extract (enable combos and/or cases)."
+            )
+        session.setup_select_loads(combos_use, cases_use)
+    elif combos_use is not None:
+        if not combos_use:
+            raise ExtractionError(
+                "Combination list is empty; model has no load combinations "
+                "(confirm combos are defined in the ETABS model)."
+            )
+        session.setup_select_loads(combos_use, [])
+    elif cases_use is not None:
+        if not cases_use:
+            raise ExtractionError(
+                "Load-case list is empty; model has no load cases "
+                "(confirm cases are defined in the ETABS model)."
+            )
+        session.setup_select_loads([], cases_use)
+    return combos_use, cases_use
+
+
+def _assemble(records: list, to_df: Callable) -> tuple:
+    """Consolidated DataFrame + per-load DataFrames + grouped records.
+
+    Shared by every extraction kind; ``to_df`` is the kind's record→DataFrame
+    converter (``to_dataframe`` / ``to_base_dataframe``).
+    """
+    grouped: dict[str, list] = {}
+    for r in records:
+        grouped.setdefault(r.load_name, []).append(r)
+    consolidated = to_df(records)
+    per_load = {name: to_df(recs) for name, recs in grouped.items()}
+    return consolidated, per_load, grouped
+
+
+def _extract(
+    kind: ExtractKind,
+    model_path: str | None = None,
+    output_dir: str | None = None,
+    *,
+    combos: list[str] | None = None,
+    cases: list[str] | None = None,
+    all_requested: bool = False,
+    attach: bool = True,
+    launch: bool = False,
+    run_analysis: bool = False,
+    name_filter: list[str] | None = None,
+    post_filter: Callable | None = None,
+    session: "EtabsSession | None" = None,
+    tag: str | None = None,
+) -> tuple:
+    """Shared extraction driver for every :class:`ExtractKind`.
+
+    Owns the connection lifecycle, load selection, run-analysis, name
+    filtering, per-item reads, optional post-filtering, DataFrame assembly
+    and CSV writing.  ``name_filter`` restricts the object names to read
+    (``--frames`` / ``--points``); ``post_filter`` optionally drops whole
+    records before assembly (e.g. ``only_loaded``).  Returns
+    ``(consolidated_DataFrame, {load_name: DataFrame}, list[record])`` — the
+    shape every public extractor returns.
+    """
+    session, own_session = _connect_session(
+        session, model_path, attach=attach, launch=launch
+    )
+
+    try:
+        combos_use, cases_use = _select_loads(
+            session, combos=combos, cases=cases, all_requested=all_requested
+        )
+
+        if run_analysis:
+            session.run_analysis()
+
+        names = kind.get_names(session)
+        if not names:
+            raise ExtractionError(
+                f"Model contains no {kind.label} objects to extract."
+            )
+        if name_filter:
+            names = [n for n in names if n in set(name_filter)]
+
+        all_records: list = []
+        for name in names:
+            all_records.extend(kind.read(session, name, combos_use, cases_use))
+
+        if post_filter is not None:
+            all_records = post_filter(all_records)
+
+        consolidated, per_load, grouped = _assemble(all_records, kind.to_df)
+
+        if output_dir:
+            kind.write(all_records, grouped, output_dir, tag)
+
+        return consolidated, per_load, all_records
+
+    finally:
+        if own_session:
+            _release_helper(session)
+
+
 def _read_frame_forces(
     session: "EtabsSession",
     frame: str,
     combos: list[str] | None,
     cases: list[str] | None,
-    section_map: dict,
 ) -> list[FrameForceRecord]:
     """Read forces for a single frame across the selected combos/cases.
 
     Selection is applied per whole-model via setup calls in the caller; here
     we rely on the COM ``FrameForce`` item-type=0 (Object) returning all
-    selected load names for this frame at once.
+    selected load names for this frame at once.  The section name is a
+    best-effort per-frame lookup (one COM call per frame, as before).
     """
     raw = session.frame_force(frame, item_type_elm=0)
     if raw is None:
@@ -147,7 +304,7 @@ def _read_frame_forces(
         P, V2, V3, T, M2, M3,
     ) = raw
 
-    section = section_map.get(frame, "")
+    section = session.get_section_for_frame(frame) or ""
 
     records: list[FrameForceRecord] = []
     # NumberResults is a COM by-ref scalar; coerce via len for list-like
@@ -290,6 +447,48 @@ def _is_null_reaction(r: JointReactionRecord, tol: float = 1e-9) -> bool:
     )
 
 
+# --- Per-kind CSV writers --------------------------------------------------
+
+
+def _write_frame_csvs(records, grouped, output_dir, tag) -> None:
+    """Per-load + consolidated + envelope CSVs for frame forces."""
+    for name, recs in grouped.items():
+        kind = recs[0].load_kind if recs else "COMBO"
+        write_csv(recs, output_dir, name, load_kind=kind, tag=tag)
+    write_all_forces_csv(records, output_dir, tag=tag)
+    write_envelope_csv(records, output_dir, tag=tag)
+
+
+def _write_base_csvs(records, grouped, output_dir, tag) -> None:
+    """Per-load (+ MIN/MAX step splits) + consolidated + envelope CSVs for
+    base reactions."""
+    for name, recs in grouped.items():
+        kind = recs[0].load_kind if recs else "COMBO"
+        write_base_csv(recs, output_dir, name, load_kind=kind, tag=tag)
+        # Per-load MIN/MAX split files: partition this load's rows by ETABS
+        # StepType ("Max"/"Min"); rows with any other step stay only in the
+        # mixed per-load file.  A split file is written only when it has rows.
+        for step_key in ("min", "max"):
+            split = [r for r in recs if _step_key(r.step_type) == step_key]
+            if split:
+                write_base_step_csv(
+                    split, output_dir, name, load_kind=kind, step=step_key, tag=tag
+                )
+    write_all_base_csv(records, output_dir, tag=tag)
+    write_base_envelope_csv(records, output_dir, tag=tag)
+    write_base_envelope_min_csv(records, output_dir, tag=tag)
+    write_base_envelope_max_csv(records, output_dir, tag=tag)
+
+
+_FRAME_KIND = ExtractKind(
+    label="frame",
+    get_names=lambda s: s.get_frame_names(),
+    read=_read_frame_forces,
+    to_df=to_dataframe,
+    write=_write_frame_csvs,
+)
+
+
 def extract_forces(
     model_path: str | None = None,
     output_dir: str | None = None,
@@ -313,89 +512,20 @@ def extract_forces(
     If a ``session`` is passed (e.g. the test fake), it is used directly and
     no COM connection is attempted; otherwise one is created.
     """
-    import pandas as pd  # noqa: PLC0415
-
-    from .io import write_all_forces_csv, write_csv, write_envelope_csv
-    from .models import to_dataframe
-
-    session, own_session = _connect_session(
-        session, model_path, attach=attach, launch=launch
+    return _extract(
+        _FRAME_KIND,
+        model_path,
+        output_dir,
+        combos=combos,
+        cases=cases,
+        all_requested=all_requested,
+        attach=attach,
+        launch=launch,
+        run_analysis=run_analysis,
+        name_filter=frames,
+        session=session,
+        tag=tag,
     )
-
-    try:
-        combos_use, cases_use = _resolve_names(
-            combos=combos,
-            cases=cases,
-            session=session,
-            all_requested=all_requested,
-        )
-
-        if combos_use is None and cases_use is None:
-            raise ExtractionError("Nothing selected to extract (enable combos and/or cases).")
-
-        if combos_use is not None and cases_use is not None:
-            if not combos_use and not cases_use:
-                raise ExtractionError(
-                    "Nothing selected to extract (enable combos and/or cases)."
-                )
-            session.setup_select_loads(combos_use, cases_use)
-        elif combos_use is not None:
-            if not combos_use:
-                raise ExtractionError(
-                    "Combination list is empty; model has no load combinations "
-                    "(confirm combos are defined in the ETABS model)."
-                )
-            session.setup_select_combos(combos_use)
-        elif cases_use is not None:
-            if not cases_use:
-                raise ExtractionError(
-                    "Load-case list is empty; model has no load cases "
-                    "(confirm cases are defined in the ETABS model)."
-                )
-            session.setup_select_cases(cases_use)
-
-        if run_analysis:
-            session.run_analysis()
-
-        frame_names = session.get_frame_names()
-        if not frame_names:
-            raise ExtractionError("Model contains no frame objects to extract.")
-        # Optional filter.
-        if frames:
-            frame_names = [f for f in frame_names if f in set(frames)]
-
-        section_map = {f: session.get_section_for_frame(f) for f in frame_names}
-
-        all_records: list[FrameForceRecord] = []
-        for frame in frame_names:
-            all_records.extend(
-                _read_frame_forces(session, frame, combos_use, cases_use, section_map)
-            )
-
-        consolidated = to_dataframe(all_records)
-
-        # Group by load_name for the dict output.
-        grouped: dict[str, list[FrameForceRecord]] = {}
-        for r in all_records:
-            grouped.setdefault(r.load_name, []).append(r)
-
-        per_load: dict[str, object] = {}
-        for name, recs in grouped.items():
-            per_load[name] = to_dataframe(recs)
-
-        if output_dir:
-            for name, recs in grouped.items():
-                kind = recs[0].load_kind if recs else "COMBO"
-                write_csv(recs, output_dir, name, load_kind=kind, tag=tag)
-            write_all_forces_csv(all_records, output_dir, tag=tag)
-            write_envelope_csv(all_records, output_dir, tag=tag)
-
-        return consolidated, per_load, all_records
-
-    finally:
-        if own_session:
-            # Tear down the helper we created (best effort; no-op on fakes).
-            _release_helper(session)
 
 
 def _read_point_reactions(
@@ -452,6 +582,30 @@ def _read_point_reactions(
     return records
 
 
+def _make_point_reader(elevation: float | None):
+    """Return a per-point reader for :class:`ExtractKind` (base reactions).
+
+    Captures the optional ``elevation`` filter: a point whose ``z`` does not
+    match is skipped entirely (no reaction read), and unresolvable
+    coordinates degrade to ``None`` slots instead of raising — mirroring the
+    pre-refactor behavior of ``extract_base_reactions``.
+    """
+
+    def _read(session, point, combos, cases) -> list[JointReactionRecord]:
+        try:
+            coords = session.get_point_coords(point)
+        except Exception as exc:  # noqa: BLE001 - coordinates are best-effort
+            logger.debug("Point coordinate lookup failed for %r: %s", point, exc)
+            coords = (None, None, None)
+        if elevation is not None:
+            z = coords[2]
+            if z is None or not _z_match(z, elevation):
+                return []
+        return _read_point_reactions(session, point, combos, cases, coords)
+
+    return _read
+
+
 def extract_base_reactions(
     model_path: str | None = None,
     output_dir: str | None = None,
@@ -482,124 +636,33 @@ def extract_base_reactions(
     and the separated ``base_envelope_min.csv`` / ``base_envelope_max.csv``.  A
     ``tag`` appends a suffix to every output filename.
     """
-    import pandas as pd  # noqa: PLC0415
-
-    from .io import (
-        write_all_base_csv,
-        write_base_csv,
-        write_base_envelope_csv,
-        write_base_envelope_max_csv,
-        write_base_envelope_min_csv,
+    kind = ExtractKind(
+        label="point",
+        get_names=lambda s: s.get_point_names(),
+        read=_make_point_reader(elevation),
+        to_df=to_base_dataframe,
+        write=_write_base_csvs,
     )
-    from .models import to_base_dataframe
-
-    session, own_session = _connect_session(
-        session, model_path, attach=attach, launch=launch
+    post_filter = (
+        (lambda recs: [r for r in recs if not _is_null_reaction(r)])
+        if only_loaded
+        else None
     )
-
-    try:
-        combos_use, cases_use = _resolve_names(
-            combos=combos,
-            cases=cases,
-            session=session,
-            all_requested=all_requested,
-        )
-
-        if combos_use is None and cases_use is None:
-            raise ExtractionError("Nothing selected to extract (enable combos and/or cases).")
-
-        if combos_use is not None and cases_use is not None:
-            if not combos_use and not cases_use:
-                raise ExtractionError(
-                    "Nothing selected to extract (enable combos and/or cases)."
-                )
-            session.setup_select_loads(combos_use, cases_use)
-        elif combos_use is not None:
-            if not combos_use:
-                raise ExtractionError(
-                    "Combination list is empty; model has no load combinations "
-                    "(confirm combos are defined in the ETABS model)."
-                )
-            session.setup_select_combos(combos_use)
-        elif cases_use is not None:
-            if not cases_use:
-                raise ExtractionError(
-                    "Load-case list is empty; model has no load cases "
-                    "(confirm cases are defined in the ETABS model)."
-                )
-            session.setup_select_cases(cases_use)
-
-        if run_analysis:
-            session.run_analysis()
-
-        point_names = session.get_point_names()
-        if not point_names:
-            raise ExtractionError("Model contains no point objects to extract.")
-        # Optional name filter.
-        if points:
-            point_names = [p for p in point_names if p in set(points)]
-
-        all_records: list[JointReactionRecord] = []
-        for point in point_names:
-            try:
-                coords = session.get_point_coords(point)
-            except Exception as exc:  # noqa: BLE001 - coordinates are best-effort
-                logger.debug("Point coordinate lookup failed for %r: %s", point, exc)
-                coords = (None, None, None)
-            # Optional elevation filter — skip points not on the requested level
-            # (avoids reading reactions for every other joint).
-            if elevation is not None:
-                z = coords[2]
-                if z is None or not _z_match(z, elevation):
-                    continue
-            recs = _read_point_reactions(session, point, combos_use, cases_use, coords)
-            all_records.extend(recs)
-
-        # Optional: keep only points that carry load (any component non-zero).
-        if only_loaded:
-            all_records = [
-                r for r in all_records
-                if not _is_null_reaction(r)
-            ]
-
-        consolidated = to_base_dataframe(all_records)
-
-        # Group by load_name for the dict output.
-        grouped: dict[str, list[JointReactionRecord]] = {}
-        for r in all_records:
-            grouped.setdefault(r.load_name, []).append(r)
-
-        per_load: dict[str, object] = {}
-        for name, recs in grouped.items():
-            per_load[name] = to_base_dataframe(recs)
-
-        if output_dir:
-            from .io import write_base_step_csv
-
-            for name, recs in grouped.items():
-                kind = recs[0].load_kind if recs else "COMBO"
-                write_base_csv(recs, output_dir, name, load_kind=kind, tag=tag)
-                # Per-load MIN/MAX split files: partition this load's rows by
-                # ETABS StepType ("Max"/"Min"); rows with any other step stay
-                # only in the mixed per-load file.  A split file is written
-                # only when it has at least one row.
-                for step_key in ("min", "max"):
-                    split = [r for r in recs if _step_key(r.step_type) == step_key]
-                    if split:
-                        write_base_step_csv(
-                            split, output_dir, name, load_kind=kind, step=step_key, tag=tag
-                        )
-            write_all_base_csv(all_records, output_dir, tag=tag)
-            write_base_envelope_csv(all_records, output_dir, tag=tag)
-            write_base_envelope_min_csv(all_records, output_dir, tag=tag)
-            write_base_envelope_max_csv(all_records, output_dir, tag=tag)
-
-        return consolidated, per_load, all_records
-
-    finally:
-        if own_session:
-            # Best-effort release of the helper we created (no-op on fakes).
-            _release_helper(session)
+    return _extract(
+        kind,
+        model_path,
+        output_dir,
+        combos=combos,
+        cases=cases,
+        all_requested=all_requested,
+        attach=attach,
+        launch=launch,
+        run_analysis=run_analysis,
+        name_filter=points,
+        post_filter=post_filter,
+        session=session,
+        tag=tag,
+    )
 
 
 def list_available(

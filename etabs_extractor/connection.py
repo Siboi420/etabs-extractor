@@ -37,8 +37,8 @@ class EtabsConnectionError(RuntimeError):
 # we keep it as a protocol-ish Any here and import comtypes lazily.
 def _comtypes():
     try:
-        import comtypes  # noqa: PLC0415
-        import comtypes.client  # noqa: PLC0415
+        import comtypes  # noqa: PLC0415  # pyright: ignore[reportMissingImports]  # comtypes is Windows-only; absent from the WSL venv by design
+        import comtypes.client  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
         return comtypes
     except ImportError as exc:  # pragma: no cover - controlled path
         raise EtabsConnectionError(
@@ -74,7 +74,7 @@ def _c_helper(comtypes):
         # Not generated yet — fall through and generate below.
         pass
 
-    from comtypes.client import GetModule  # noqa: PLC0415
+    from comtypes.client import GetModule  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
 
     GetModule(DEFAULT_COM_PROGID)  # "ETABSv1.Helper"
     et = importlib.import_module("comtypes.gen.ETABSv1")
@@ -83,12 +83,12 @@ def _c_helper(comtypes):
 
 def _ensure_comtypes_wrapper_available() -> None:
     """Force-cache the generated comtypes wrapper so COM calls resolve."""
-    import comtypes  # noqa: PLC0415
+    import comtypes  # noqa: PLC0415  # pyright: ignore[reportMissingImports]  # comtypes is Windows-only; absent from the WSL venv by design
 
     progid = _etabs_progid()
     try:
         # Register the type library in comtypes' generated cache.
-        from comtypes.client import GetModule  # noqa: PLC0415
+        from comtypes.client import GetModule  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
 
         GetModule(progid)
     except Exception:  # noqa: BLE001  pragma: no cover
@@ -272,27 +272,13 @@ class EtabsSession:
             pass
         return ""
 
-    def setup_select_combos(self, combos: list[str] | None) -> None:
-        """Select only ``combos`` for output; deselect everything else."""
-        setup = self.sap_model.Results.Setup
-        setup.DeselectAllCasesAndCombosForOutput()
-        for c in combos or []:
-            setup.SetComboSelectedForOutput(c, True)
-
-    def setup_select_cases(self, cases: list[str] | None) -> None:
-        """Select only ``cases`` for output; deselect everything else."""
-        setup = self.sap_model.Results.Setup
-        setup.DeselectAllCasesAndCombosForOutput()
-        for c in cases or []:
-            setup.SetCaseSelectedForOutput(c, True)
-
     def setup_select_loads(self, combos: list[str] | None, cases: list[str] | None) -> None:
-        """Select both ``combos`` and ``cases`` together for output.
+        """Select the given ``combos`` and ``cases`` for output.
 
-        Combines the two separate selection calls into one so both streams stay
-        selected (calling ``setup_select_combos`` then ``setup_select_cases``
-        would otherwise have each one ``DeselectAll...`` the other).  Deselects
-        everything once, then selects the given combos and cases.
+        Deselects everything once, then selects the given combos and cases
+        together (one ``DeselectAll`` + both selections).  This is the only
+        selection method the extractor uses — combos-only / cases-only / both
+        are all routed through it (with an empty list for the skipped stream).
         """
         setup = self.sap_model.Results.Setup
         setup.DeselectAllCasesAndCombosForOutput()

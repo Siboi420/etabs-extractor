@@ -277,18 +277,6 @@ class _FakeSession(_extractor_connection.EtabsSession):
         c = self.sap_model.PointObj.coords.get(point, (None, None, None))
         return (c[0], c[1], c[2])
 
-    def setup_select_combos(self, combos):
-        s = self.sap_model.Results.Setup
-        s.DeselectAllCasesAndCombosForOutput()
-        for c in (combos or []):
-            s.SetComboSelectedForOutput(c, True)
-
-    def setup_select_cases(self, cases):
-        s = self.sap_model.Results.Setup
-        s.DeselectAllCasesAndCombosForOutput()
-        for c in (cases or []):
-            s.SetCaseSelectedForOutput(c, True)
-
     def setup_select_loads(self, combos, cases):
         """Mirror ``setup_select_loads`` on the real session: deselect once,
         then select both combos and cases together."""
