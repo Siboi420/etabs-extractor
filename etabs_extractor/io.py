@@ -155,6 +155,43 @@ def write_all_base_csv(
     return path
 
 
+def write_frame_step_csv(
+    records: Iterable[FrameForceRecord],
+    output_dir: str | os.PathLike,
+    load_name: str,
+    load_kind: str = "COMBO",
+    step: str = "",
+    tag: str | None = None,
+) -> Path | None:
+    """Write the records of one ETABS result step (``Min``/``Max``) of a
+    frame load to ``combo_<load>_<step>.csv`` / ``case_<load>_<step>.csv``
+    (no ``base_`` prefix).
+
+    ``step`` is lowercased and filesystem-sanitized; a ``tag`` is appended to
+    the stem via :func:`_append_tag` (e.g. ``combo_ASD_Max_min_KM13.csv``).
+    Returns ``None`` when ``records`` is empty (no split file written).  The
+    written schema is the full :data:`COLUMNS` (including ``step_type``).
+    """
+    recs = list(records)
+    if not recs:
+        return None
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rows = [r.to_dict() for r in recs]
+    prefix = "combo" if load_kind.upper() == "COMBO" else "case"
+    stem = f"{prefix}_{_sanitize_filename(load_name)}"
+    step_part = _sanitize_filename(step.lower()) if step else ""
+    if step_part:
+        stem = f"{stem}_{step_part}"
+    fname = _append_tag(stem, tag) + ".csv"
+    path = out_dir / fname
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
 def write_base_step_csv(
     records: Iterable[JointReactionRecord],
     output_dir: str | os.PathLike,

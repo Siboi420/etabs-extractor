@@ -42,9 +42,13 @@ class FrameForceRecord:
     moment_3: float       # M3 — moment about local 3 axis (N.mm)
 
     # Optional bookkeeping (element labels, not required)
+    length_mm: float | None = None  # Euclidean length of the frame object (mm); None when unknown
     obj_sta: float | None = None
     elm: str | None = None
     elm_sta: float | None = None
+
+    # ETABS result step ("Max"/"Min" for envelope combos, "" for plain loads)
+    step_type: str = ""
 
     def to_dict(self) -> dict:
         """Return an ordered dict suitable for CSV/DataFrame rows."""
@@ -56,12 +60,14 @@ class FrameForceRecord:
             "station": d["station"],
             "load_name": d["load_name"],
             "load_kind": d["load_kind"],
+            "step_type": d["step_type"],
             "P": d["axial"],
             "V2": d["shear_2"],
             "V3": d["shear_3"],
             "T": d["torsion"],
             "M2": d["moment_2"],
             "M3": d["moment_3"],
+            "length_mm": d["length_mm"],
             "obj_sta": d["obj_sta"],
             "elm": d["elm"],
             "elm_sta": d["elm_sta"],
@@ -75,12 +81,14 @@ COLUMNS = [
     "station",
     "load_name",
     "load_kind",
+    "step_type",
     "P",
     "V2",
     "V3",
     "T",
     "M2",
     "M3",
+    "length_mm",
     "obj_sta",
     "elm",
     "elm_sta",

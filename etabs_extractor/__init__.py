@@ -35,6 +35,7 @@ from .io import (
     write_base_envelope_min_csv,
     write_base_step_csv,
     write_csv,
+    write_frame_step_csv,
 )
 from .plots import (
     COMPONENT_COLUMNS,
@@ -68,6 +69,7 @@ __all__ = [
     "write_base_envelope_min_csv",
     "write_base_envelope_max_csv",
     "write_base_step_csv",
+    "write_frame_step_csv",
     "DEFAULT_COMPONENTS",
     "COMPONENT_COLUMNS",
     "COMPONENT_UNITS",

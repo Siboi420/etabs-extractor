@@ -261,6 +261,78 @@ def test_plot_base_reactions_dpi_figsize():
         print("plot_base_reactions dpi/figsize/fontsize OK")
 
 
+def test_service_frame_mode_kwargs():
+    """Frame-mode settings map to extract_forces kwargs (frames + sections,
+    no elevation/only_loaded); base mode is unchanged."""
+    s = GuiSettings(
+        model_path="/mnt/d/models/x.EDB", output_dir="/mnt/d/out", tag="K",
+        extract_mode="frame",
+        selected_combos=["ASD 1"], selected_cases=["Dead"],
+        selected_sections=["COL1"], selected_frames=["C1"],
+    )
+    kw = service.build_extract_kwargs(s)
+    assert kw["sections"] == ["COL1"]
+    assert kw["frames"] == ["C1"]
+    assert kw["combos"] == ["ASD 1"]
+    assert kw["cases"] == ["Dead"]
+    # No base-only kwargs in frame mode.
+    assert "elevation" not in kw
+    assert "only_loaded" not in kw
+    # Empty sections/frames -> None (no filter).
+    s2 = GuiSettings(extract_mode="frame")
+    kw2 = service.build_extract_kwargs(s2)
+    assert kw2["sections"] is None and kw2["frames"] is None
+    print("service.build_extract_kwargs (frame mode) OK")
+
+
+def test_load_selection_model_kind_groups():
+    """LoadSelectionModel generalised to configurable group kinds (sections /
+    frames); ``get_selected`` returns the two groups."""
+    model = LoadSelectionModel(kind_a="section", kind_b="frame")
+    model.set_items(["COL1", "B1"], ["C1", "B2"])
+    assert model.all_combos == ["COL1", "B1"]
+    assert model.all_cases == ["C1", "B2"]
+    items = model.items()
+    model.toggle(items.index([i for i in items if i.name == "COL1"][0]), True)
+    model.toggle(items.index([i for i in items if i.name == "B2"][0]), True)
+    a, b = model.get_selected()
+    assert a == ["COL1"], a
+    assert b == ["B2"], b
+    print("LoadSelectionModel frame kinds OK")
+
+
+def test_inspect_active_model_fake2():
+    """inspect_active_model returns sections/frames from the fake, and
+    degrades to [] when the fake lacks those methods (best-effort)."""
+    class _Full:
+        def get_model_filename(self, include_path=True):
+            return "D:\\Models\\fake.EDB"
+        def get_combo_names(self):
+            return ["ASD 1"]
+        def get_case_names(self):
+            return ["Dead"]
+        def get_frame_section_names(self):
+            return ["COL1", "B1"]
+        def get_frame_names(self):
+            return ["C1", "B1"]
+
+    info = service.inspect_active_model(attach=False, session=_Full())
+    assert info["sections"] == ["COL1", "B1"]
+    assert info["frames"] == ["C1", "B1"]
+
+    class _Sparse:
+        def get_model_filename(self, include_path=True):
+            return "D:\\Models\\fake.EDB"
+        def get_combo_names(self):
+            return []
+        def get_case_names(self):
+            return []
+
+    info2 = service.inspect_active_model(attach=False, session=_Sparse())
+    assert info2["sections"] == [] and info2["frames"] == []
+    print("inspect_active_model sections/frames OK")
+
+
 def test_service_extract_kwargs_mapping():
     s = GuiSettings(
         model_path="/mnt/d/models/x.EDB",

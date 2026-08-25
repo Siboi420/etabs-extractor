@@ -80,7 +80,7 @@ pyrightconfig.json
   never forces COM. `EtabsSession` exposes a small, **duck-typed** surface
   (`frame_force`, `joint_react`, `get_frame_names`, `get_combo_names`,
   `get_case_names`, `get_point_names`, `get_point_coords`,
-  `get_section_for_frame`, `setup_select_loads`, `open_model`,
+  `get_section_for_frame`, `get_frame_length_mm`, `setup_select_loads`, `open_model`,
   `run_analysis`) so tests substitute a fake.
 - **`results.py` orchestrates against the duck-typed surface**, never
   against COM directly. Same code path runs on a live session or the test
@@ -98,7 +98,7 @@ CLI/API -> results.extract_forces()
            -> _select_loads() -> setup_select_loads()  (enable outputs in ETABS)
         -> get_frame_names()
         -> _read_frame_forces() per frame  (session.frame_force)
-        -> FrameForceRecord[]        (one per station)
+        -> FrameForceRecord[]        (one per station, with length_mm)
         -> models.to_dataframe()  -> consolidated + per-load DataFrames
         -> io.write_csv / write_all_forces_csv / write_envelope_csv
 
@@ -618,6 +618,119 @@ interactive checklist, and let **combos and cases be extracted together**:
 - Re-exported from `__init__.py` (all pure / top-level-safe), incl.
   `UNITS` / `DEFAULT_UNITS`, `summarize_base_envelope_minmax`,
   `write_base_envelope_min_csv`, `write_base_envelope_max_csv`.
+
+### Completed: frame-mode GUI switch + frame step-split CSVs + frame section/frame selector
+
+A follow-up to base-reaction work added **frame extraction to the GUI** as a
+second mode, plus per-load frame MIN/MAX step-split CSVs and an optional
+section-name filter (library + GUI):
+
+**Frame records: step type (library)**
+
+- `FrameForceRecord` gains `step_type: str = ""` (last field, default keeps
+the arg order valid) — the ETABS `StepType` value (`"Max"`/`"Min"` for
+envelope combos, `""` for plain loads). It is exported between `load_kind`
+and `N` in `to_dict()` and in `COLUMNS`, so `all_forces.csv` and every frame
+DataFrame distinguish steps.
+- `_read_frame_forces` (`results.py`) captures `step_type=_s(StepType, i)`
+(the `StepType` array was already unpacked, previously discarded).
+
+**Frame per-load MIN/MAX split CSVs (library)** — `io.write_frame_step_csv`
+writes `combo_<load>_<min_or_max>.csv` / `case_<load>_<step>.csv` (no
+`base_` prefix; returns `None` for empty records). `_write_frame_csvs`
+partitions each load by `_step_key(r.step_type)` and writes the split
+only when non-empty — **in addition to** the existing mixed
+`combo_<load>.csv`. Frame-force envelope summary files are unchanged.
+Exported from `__init__.py`.
+
+**Section-name listing + section filter (library)** —
+`EtabsSession.get_frame_section_names()` via `_gp(PropFrame.GetNameList)`
+(same `_gp` pattern as `FrameObj.GetNameList`; COM quarantined).
+`extract_forces(..., sections=None)` builds a per-call `ExtractKind` whose
+reader early-returns `[]` when a frame's section is not in the filter
+(`_make_frame_reader`), giving **AND** semantics with the existing
+`frames` name filter (each optional). `list_available()` adds
+`"section_names"` (best-effort try/except like `point_names`).
+
+**GUI mode switch + frame selector** —
+- `gui.state`: `GuiSettings` gains `extract_mode="base"`,
+  `selected_sections: list[str]`, `selected_frames: list[str]`; `MODE_CHOICES`.
+  `LoadSelectionModel` generalised to configurable group kinds
+  (`kind_a="combo"`, `kind_b="case"` in `__init__`/`set_items`);
+  `get_selected()` still returns a 2-tuple over the two groups;
+  `all_combos`/`all_cases` are thin aliases of group-a/group-b (kept for the
+  existing tests).
+- `LoadSelectionField` gains `label`/`title`/`empty_summary` /
+  `kind_a`/`kind_b` constructor args (defaults preserve base-mode behaviour);
+  `set_items`/`get_selected` forward to the model.
+- `app.py`: a `mode_var` radio row switches base vs frame;
+  `_apply_mode()` (registered mode-scoped widgets in `_build_layout`)
+  shows/hides base-only (elevation, only-loaded, plot frame, plot-after,
+  CSV frame, plan-preview row) and frame-only (a second `LoadSelectionField`
+  with `kind_a="section"`, `kind_b="frame"`, label `Frames`) via
+  `pack()`/`pack_forget()`. `_collect_settings` sets `extract_mode`,
+  reads `selected_sections/selected_frames` in frame mode, and leaves
+  base-only fields untouched in frame mode. `frame_field` is populated when
+  `inspect_active_model` returns `sections`/`frames`.
+- `service.py`: `inspect_active_model` additionally returns `"sections"` and
+  `"frames"` (each best-effort try/except → `[]`), `build_mode_kwargs`
+  maps the active mode (frame → `{frames, sections, ...}`) and `do_extract`
+  dispatches on `extract_mode` (frame → `extract_forces`, never plots;
+  base keeps `extract_base_reactions` + optional plot). Result-dict shape is
+  unchanged, so the plan-preview already carries `df`/`per_load` for both
+  modes.
+
+**Out of scope (intentionally):** no frame plotting/force-diagram preview
+(result dict already carries `df`/`per_load`); no CLI `--sections` flag (CLI
+`--extract frame` gains the step-split CSVs via `_write_frame_csvs`
+automatically); no frame envelope MIN/MAX split files (`envelope_summary.csv`
+stays as-is).
+
+### Completed: beam force diagram viewer
+
+A standalone interactive **beam force diagram viewer** (`beam_viewer.py`) was
+added to the repository root. It loads the `all_forces.csv` output from a
+frame-force extraction and displays axial-force (P), shear (V2), and
+bending-moment (M3) diagrams for any beam in the model. No COM connection or
+running ETABS is needed — it reads the CSV file directly.
+
+**Architecture:**
+
+- `beam_viewer.py` is a self-contained script (not part of the `etabs_extractor`
+  package) that uses matplotlib for rendering and user interaction.
+- It loads the CSV via pandas, filters by section type (B1, B2, K1, P600, RB-1)
+  and load case, and auto-selects the beam with the highest absolute |M3| value.
+- Forces are converted from model units (N / N·mm) to display units (kN / kN·m)
+  for readability.
+- Positive and negative regions are filled in green and red respectively, with
+  max/min annotations on each diagram.
+
+**Keyboard controls:**
+
+| Key | Action |
+|-----|--------|
+| `←` / `→` | Cycle load cases |
+| `↑` / `↓` | Cycle beams within the current section |
+| `S` | Cycle section type |
+| `H` | Toggle auto-select highest-force beam |
+| `Q` | Quit |
+
+**Usage:**
+
+```bash
+# After extracting frame forces, run the viewer from any platform:
+cd ~/Projects/Structural\ Works/etabs_extractor
+.venv/bin/python beam_viewer.py "/mnt/d/.../extracted/all_forces.csv"
+```
+
+**Known viewer limitations:**
+- The viewer always shows P, V2, and M3 (the primary bending axis). For beams
+  with significant V3/M2 (biaxial bending), only V2/M3 is displayed by default.
+  The `FORCE_DIAGRAMS` tuple in the script can be edited to show V3/M2 instead.
+- Station data is plotted as-is from the CSV; beams with very few stations
+  (e.g. 3 for some P600 piles) produce coarser diagrams.
+- Interactive mode requires a display (X11/Wayland on WSL/Linux, native on
+  Windows). For headless batch rendering, use the script's functions directly.
 
 ### Known pitfalls / bugs to watch (base reactions)
 

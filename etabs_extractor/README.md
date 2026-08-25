@@ -4,6 +4,7 @@ Extract results from an **ETABS 22** model via the CSI COM API and write
 them to CSV (also returning pandas DataFrames):
 
 - **frame-element internal forces** — axial `P`, shears `V2`/`V3`, torsion
+  Each row also carries the frame object's **Euclidean length** in mm (`length_mm` column), computed from the end-point coordinates via `FrameObj.GetPoints`. Unknown/unresolvable lengths are `None` (NaN in the DataFrame).
   `T`, moments `M2`/`M3` for every frame object across the model's load
   combinations (and optionally load cases) — `--extract frame` (default).
 - **per-joint (base) reactions** — reaction forces `F1`/`F2`/`F3` and moments
@@ -47,14 +48,16 @@ cd ~/Projects/Structural\ Works/etabs_extractor
 See "Running from WSL against a live ETABS (`run_etabs.sh`)" below for
 details and fallbacks.
 
-## Interactive GUI (base reactions + plotting)
+## Interactive GUI (base reactions + frame forces)
 
 A **tkinter GUI** (`etabs_extractor/gui/`) provides a point-and-click way to
 check the active ETABS model, choose an export destination and filename tag,
 configure plot appearance (dynamic figure size, fixed width/height, DPI —
-default 800 — and label font size), run **base-reaction extraction**, and
-preview / save **plan-view plots**. It also plots from an existing base CSV
-with no ETABS running. Scope is base extraction + plotting only.
+default 800 — and label font size), and **switch between two extraction
+modes**: **Base reactions** (default) or **Frame forces**. In base mode it
+plots plan-view figures of the base reactions and previews / saves them; it
+also plots from an existing base CSV with no ETABS running. Plotting stays
+base-only.
 
 Launch from WSL against Windows ETABS:
 
@@ -71,12 +74,23 @@ python -m etabs_extractor.gui
 
 In the window:
 
+- **Extraction mode** — two radio buttons at the top: **Base reactions**
+  (default) or **Frame forces**. Base mode shows the elevation / loaded-
+  supports controls, plot-appearance frame, CSV frame and plan-preview row;
+  frame mode shows a **Frames** selector instead (hiding the base-only
+  controls).
 - **Model row** — file entry + Browse (`*.EDB` / `*.et`) + **"Check active
   model"**, which attaches to the running ETABS, fills the path field via
   `SapModel.GetModelFilename` (a cSapModel method on the model object, not
   the File interface; no path needed), **and** populates the load dropdown
   with the active model's **combinations and load cases** (via
-  `get_combo_names` / `get_case_names`).
+  `get_combo_names` / `get_case_names`), and in frame mode also
+  populates the **Frames** selector with the model's **sections and
+  frame objects** (via `get_frame_section_names` / `get_frame_names`).
+- **Frames selector** (frame mode) — a **searchable multi-select
+  checklist** of the model's **sections + frame objects**, multi-select
+  within each group is a union, empty is no filter, and sections +
+  frames combine AND when both are selected.
 - **Destination row** — directory entry + Browse (defaults to `ETABS_OUTPUT`).
 - **Tag row** — a filename suffix applied to every output (sanitized).
 - **Load selection** — a **searchable multi-select checklist** of the active
@@ -283,11 +297,13 @@ The model path can also be supplied via the `ETABS_MODEL` env var and the
 output dir via `ETABS_OUTPUT`. The package **never hardcodes** model paths.
 
 `--extract` takes `frame` (default) or `base`. `--frames` filters frame
-objects for `--extract frame`; `--points` filters point objects and
-`--elevation` restricts to a single `z` elevation (model length units, e.g.
-`-16000`) and `--only-loaded` drops all-zero supports for `--extract base`
-(point-name filter applied first, and only the matching level is read).
-`--list-only` reports `Frame objs`, `Point objs`, `Combos`, and `Load cases`.
+objects for `--extract frame`; per-load MIN/MAX step split CSVs are emitted
+automatically for frame envelope combos (see Outputs). `--points` filters
+point objects and `--elevation` restricts to a single `z` elevation (model
+length units, e.g. `-16000`) and `--only-loaded` drops all-zero supports for
+`--extract base` (point-name filter applied first, and only the matching
+level is read). `--list-only` reports `Frame objs`, `Point objs`, `Combos`,
+and `Load cases`.
 
 `--plot` (after `--extract base`) renders one plan-view figure per load into
 the output dir; `--plot-csv PATH` is a standalone mode that reads a base CSV
@@ -313,8 +329,9 @@ df, per_load, records = extract_forces(
     all_requested=False,# True → both combos and cases
     # passing BOTH combos AND cases now extracts both streams together
     attach=True, launch=False, run_analysis=False,
-    frames=["B1", "C2"],# optional object-name filter
-    tag="KM13",        # optional filename suffix
+    frames=["B1", "C2"],  # optional object-name filter
+    sections=["COL1"],    # optional section-name filter (AND with frames)
+    tag="KM13",           # optional filename suffix
 )
 
 # Base (joint) reactions — same load-selection API:
@@ -337,9 +354,7 @@ session = EtabsSession.connect(attach=True)          # attach to running ETABS
 name = session.get_model_filename(include_path=True) # e.g. "D:\...\model.EDB"
 ```
 
-`df` (frame) is a long-format DataFrame with columns
-`frame, section, station, load_name, load_kind, P, V2, V3, T, M2, M3,
-obj_sta, elm, elm_sta`.
+`df` (frame) is a long-format DataFrame with columns `frame, section, station, load_name, load_kind, step_type, P, V2, V3, T, M2, M3, length_mm, obj_sta, elm, elm_sta`.
 
 `bdf` (base) has columns `point, x, y, z, load_name, load_kind, F1, F2, F3,
 M1, M2, M3` (`z` is the elevation). `F1`-`F3` are in **kN** and `M1`-`M3` in
@@ -404,6 +419,13 @@ When `output_dir` is given:
 **Frame (`--extract frame`, default):**
 
 - `combo_<name>.csv` / `case_<name>.csv` — one per load name.
+- `combo_<name>_min.csv` / `combo_<name>_max.csv` — for frame loads with
+  envelope **Max/Min steps**, the same per-load rows split by ETABS
+  `StepType` into a MIN file and a MAX file (case loads get
+  `case_<name>_min/max.csv`). Written **in addition to** the mixed per-load
+  file, only when non-empty; rows with any other step stay in the mixed file
+  only.  Each carries a `step_type` column (`Min` / `Max`) and the full
+  `COLUMNS` schema.
 - `all_forces.csv` — all rows concatenated.
 - `envelope_summary.csv` — min/max of each force per (frame, load name).
 
@@ -412,11 +434,12 @@ When `output_dir` is given:
 - `base_combo_<name>.csv` / `base_case_<name>.csv` — one per load name.
 - `base_combo_<name>_min.csv` / `base_combo_<name>_max.csv` — for loads with
   envelope **Max/Min steps**, the same per-load rows split by ETABS `StepType`
-  into a MIN file and a MAX file (case loads get `base_case_<name>_min/max.csv`).
-  Written **in addition to** the mixed per-load file, only when non-empty;
-  rows with any other step stay in the mixed file only.  Each carries a
-  `step_type` column (`Min` / `Max`) and the full `BASE_COLUMNS` schema, so
-  they remain directly plottable via `--plot-csv` / "Load preview".
+  into a MIN file and a MAX file (case loads get
+  `base_combo_<name>_min/max.csv`). Written **in addition to** the mixed
+  per-load file, only when non-empty; rows with any other step stay in the
+  mixed file only.  Each carries a `step_type` column (`Min` / `Max`) and the
+  full `BASE_COLUMNS` schema.
+
 - `all_base_reactions.csv` — all rows concatenated, with a `step_type` column
   (`Max` / `Min` for envelope rows, empty for plain loads) so steps can be
   filtered in any spreadsheet.
@@ -576,3 +599,38 @@ cd ~/Projects/Structural\ Works/etabs_extractor
 # Launch the GUI (Windows Python, ETABS should be running):
 ./run_gui.sh
 ```
+
+## Beam Force Diagram Viewer
+
+After extracting frame forces, use the interactive **beam viewer** to display
+axial-force (P), shear (V2), and bending-moment (M3) diagrams for any beam
+in the model. The viewer loads the `all_forces.csv` output and requires no
+COM connection, so it works on any platform (WSL, Linux, Windows) with
+matplotlib.
+
+```bash
+cd ~/Projects/Structural\ Works/etabs_extractor
+
+# Run the viewer on extracted data (no COM needed):
+python beam_viewer.py /path/to/all_forces.csv
+
+# Or from WSL after a live extraction (using the .venv):
+.venv/bin/python beam_viewer.py "/mnt/d/.../extracted/all_forces.csv"
+```
+
+Defaults to the beam with the highest absolute bending moment (|M3|) for
+the selected section type and load case.
+
+**Controls:**
+
+| Key | Action |
+|-----|--------|
+| `←` / `→` | Cycle load cases |
+| `↑` / `↓` | Cycle beams within the current section |
+| `S` | Cycle section type (B1, B2, K1, P600, RB-1) |
+| `H` | Toggle auto-select highest-force beam |
+| `Q` | Quit |
+
+**Force display:** raw model values (N / N·mm) are converted to kN / kN·m
+for readability. Positive and negative regions are filled in green and red
+respectively, with max/min annotations on each diagram.

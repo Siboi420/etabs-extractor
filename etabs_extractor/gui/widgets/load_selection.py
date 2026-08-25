@@ -26,26 +26,50 @@ _SUMMARY_EMPTY = "all combos"
 
 
 class LoadSelectionField(tk.Frame):
-    """A clickable field that opens a searchable multi-select checklist popup."""
+    """A clickable field that opens a searchable multi-select checklist popup.
 
-    def __init__(self, master, model: LoadSelectionModel | None = None) -> None:
+    Parameterised by two group kinds (default ``combo``/``case`` for load
+    selection, or ``section``/``frame`` for frame selection in Frame mode):
+    ``label``/``title``/``empty_summary`` set the field label, popup title and
+    empty-selection summary text respectively.
+    """
+
+    def __init__(
+        self,
+        master,
+        model: LoadSelectionModel | None = None,
+        *,
+        label: str = "Loads",
+        title: str = "Select loads",
+        empty_summary: str = _SUMMARY_EMPTY,
+        kind_a: str = "combo",
+        kind_b: str = "case",
+    ) -> None:
         super().__init__(master)
-        self._model = model if model is not None else LoadSelectionModel()
+        self._kind_a = kind_a
+        self._kind_b = kind_b
+        self._empty_summary = empty_summary
+        self._model = (
+            model
+            if model is not None
+            else LoadSelectionModel(kind_a=kind_a, kind_b=kind_b)
+        )
         self._popup: tk.Toplevel | None = None
 
-        self.label = tk.Label(self, text="Loads", anchor="w", width=14)
+        self.label = tk.Label(self, text=label, anchor="w", width=14)
         self.label.pack(side="left", padx=(0, 4))
         self.entry = tk.Entry(self, state="readonly", width=54)
         self.entry.pack(side="left", fill="x", expand=True)
         self.entry.bind("<Button-1>", lambda e: self._open())
         self.btn = tk.Button(self, text="Select", command=self._open, width=8)
         self.btn.pack(side="left", padx=(4, 0))
+        self._popup_title = title
         self._refresh_summary()
 
     # ------------------------------------------------------------------ api
-    def set_items(self, combos: list[str], cases: list[str]) -> None:
-        """Replace the available items (combo + case names) and reselect none."""
-        self._model.set_items(combos, cases)
+    def set_items(self, a: list[str], b: list[str]) -> None:
+        """Replace the available items (group-a + group-b names) and deselect."""
+        self._model.set_items(a, b, self._kind_a, self._kind_b)
         self._refresh_summary()
         # Refresh an open popup against the new item set.
         if self._popup is not None and self._popup.winfo_exists():
@@ -53,7 +77,7 @@ class LoadSelectionField(tk.Frame):
             self._popup = None
 
     def get_selected(self) -> tuple[list[str], list[str]]:
-        """Return ``(selected_combos, selected_cases)``."""
+        """Return ``(selected_a, selected_b)`` (e.g. combos/cases or sects/frame)."""
         return self._model.get_selected()
 
     def clear(self) -> None:
@@ -65,7 +89,7 @@ class LoadSelectionField(tk.Frame):
 
     def _refresh_summary(self) -> None:
         n = self._selected_count()
-        text = f"{n} selected" if n else _SUMMARY_EMPTY
+        text = f"{n} selected" if n else self._empty_summary
         self.entry.configure(state="normal")
         self.entry.delete(0, "end")
         self.entry.insert(0, text)
@@ -77,7 +101,7 @@ class LoadSelectionField(tk.Frame):
             self._popup.lift()
             return
         self._popup = tk.Toplevel(self)
-        self._popup.title("Select loads")
+        self._popup.title(self._popup_title)
         self._popup.geometry("460x420")
         self._popup.transient(self.winfo_toplevel())
         self._build_popup()

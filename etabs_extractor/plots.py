@@ -681,6 +681,94 @@ def _isna(val) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# Beam force diagram figure builder
+# ---------------------------------------------------------------------------
+
+def build_frame_figure(
+    df,
+    frame: int,
+    load_name: str,
+    section: str | None = None,
+    *,
+    figsize: tuple[float, float] = (12, 10),
+):
+    """Build a 3-panel beam force diagram figure (P, V2, M3) for one frame.
+
+    Filters ``df`` by ``frame`` and ``load_name``, optionally overrides
+    the section label (used when the section is known from context).
+    Returns the :class:`matplotlib.figure.Figure` (or ``None`` if no data
+    found).  The caller is responsible for closing it when done.
+
+    Values are scaled: N \u2192 kN, N\u00b7mm \u2192 kN\u00b7m for display.
+    Positive and negative regions are filled in green/red.
+    """
+    import matplotlib  # noqa: PLC0415
+
+    matplotlib  # unused-import workaround
+    import matplotlib.pyplot as plt  # noqa: PLC0415
+
+    sub = df[(df["frame"] == frame) & (df["load_name"] == load_name)].copy()
+    if sub.empty:
+        return None
+    sub.sort_values("station", inplace=True)
+    sub.reset_index(drop=True, inplace=True)
+
+    sec_name = section or sub["section"].iloc[0]
+    length_mm = sub["length_mm"].iloc[0] if "length_mm" in sub.columns else sub["station"].max()
+    length_m = (length_mm if length_mm else sub["station"].max()) / 1000.0
+
+    force_cols = ("P", "V2", "M3")
+    fig, axs = plt.subplots(3, 1, figsize=figsize, sharex=True)
+    fig.subplots_adjust(hspace=0.35, left=0.08, right=0.95, top=0.94, bottom=0.06)
+
+    for ax, col in zip(axs, force_cols):
+        stations_m = sub["station"].values / 1000.0
+        # Scale: N -> kN, N\u00b7mm -> kN\u00b7m
+        if col in ("P", "V2", "V3"):
+            vals = sub[col].values / 1000.0
+            unit = "kN"
+        else:
+            vals = sub[col].values / 1e6
+            unit = "kN\u00b7m"
+        col_name = {"P": "Axial (P)", "V2": "Shear (V2)", "M3": "Moment (M3)"}.get(col, col)
+
+        ax.plot(stations_m, vals, "b-", linewidth=2.0, marker="o", markersize=4)
+        ax.fill_between(stations_m, vals, 0, where=(vals >= 0), color="green", alpha=0.15)
+        ax.fill_between(stations_m, vals, 0, where=(vals < 0), color="red", alpha=0.15)
+        ax.axhline(0, color="gray", linewidth=0.5, linestyle="--")
+        ax.set_ylabel(f"{col_name} [{unit}]", fontsize=10)
+        ax.set_xlabel("Position along beam [m]", fontsize=10)
+        ax.grid(True, alpha=0.3)
+
+        # Annotate global max/min
+        if len(vals) > 0:
+            max_idx = vals.argmax()
+            min_idx = vals.argmin()
+            ax.annotate(
+                f"Max: {vals[max_idx]:.1f}",
+                xy=(stations_m[max_idx], vals[max_idx]),
+                xytext=(5, 10), textcoords="offset points",
+                fontsize=7, color="green", fontweight="bold",
+            )
+            ax.annotate(
+                f"Min: {vals[min_idx]:.1f}",
+                xy=(stations_m[min_idx], vals[min_idx]),
+                xytext=(5, -15), textcoords="offset points",
+                fontsize=7, color="red", fontweight="bold",
+            )
+
+    # Common x-range with a 5% margin
+    for ax in axs:
+        ax.set_xlim(0, length_m * 1.05)
+
+    axs[0].set_title(
+        f"Beam {frame}  |  Section: {sec_name}  |  Load: {load_name}  |  L={length_m:.2f}m",
+        fontsize=12, fontweight="bold",
+    )
+    return fig
+
+
 __all__ = [
     "DEFAULT_COMPONENTS",
     "COMPONENT_COLUMNS",
@@ -690,4 +778,5 @@ __all__ = [
     "plot_base_reactions",
     "plot_base_reactions_from_csv",
     "build_base_reactions_figure",
+    "build_frame_figure",
 ]

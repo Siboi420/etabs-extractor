@@ -25,7 +25,7 @@ from etabs_extractor.gui.service import (
 from etabs_extractor.gui.widgets.fields import DirectoryField, FileField, LabeledEntry
 from etabs_extractor.gui.widgets.load_selection import LoadSelectionField
 from etabs_extractor.gui.widgets.plot_settings import PlotSettingsFrame
-from etabs_extractor.gui.widgets.preview import PlotPreviewWindow
+from etabs_extractor.gui.widgets.preview import FramePreviewWindow, PlotPreviewWindow
 
 
 class EtabsExtractorApp(tk.Tk):
@@ -33,7 +33,7 @@ class EtabsExtractorApp(tk.Tk):
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("etabs_extractor — base reactions + plotting")
+        self.title("etabs_extractor — base reactions & frame forces")
         self.geometry("980x640")
         self.minsize(760, 560)
 
@@ -41,6 +41,7 @@ class EtabsExtractorApp(tk.Tk):
         self._runner = None
         self._result = None      # last extraction/load result dict
         self._preview_win = None # the open plot-preview pop-up (or None)
+        self._frame_preview_win = None  # the open frame-preview pop-up (or None)
         self._poll_id = None
 
         self._build_layout()
@@ -48,6 +49,18 @@ class EtabsExtractorApp(tk.Tk):
 
     # ------------------------------------------------------------------ layout
     def _build_layout(self) -> None:
+        # Widgets scoped to the active extraction mode are registered here so
+        # the mode radios can show/hide them via pack()/pack_forget().  Default
+        # mode is "base", so base-only widgets are packed at build; the
+        # frame-only selector is created but not yet packed (revealed by
+        # _apply_mode).
+        self._base_only: dict[str, tuple] = {}
+        self._frame_only: dict[str, tuple] = {}
+
+        def _reg(target, key, widget, **kwargs):
+            target[key] = (widget, kwargs)
+            return widget
+
         # -- Model / destination / tag rows ---------------------------------
         frame = ttk.LabelFrame(self, text="Model & output")
         frame.pack(fill="x", padx=8, pady=4)
@@ -72,6 +85,16 @@ class EtabsExtractorApp(tk.Tk):
         self.tag_field = LabeledEntry(frame, "Tag", "")
         self.tag_field.pack(fill="x", padx=6, pady=3)
 
+        # -- Extraction mode switch (radio; default base) --------------------
+        mode = ttk.LabelFrame(self, text="Extraction mode")
+        mode.pack(fill="x", padx=8, pady=4)
+        self.mode_var = tk.StringVar(value="base")
+        for _label, _val in (( "Base reactions", "base"), ("Frame forces", "frame")):
+            ttk.Radiobutton(
+                mode, text=_label, value=_val,
+                variable=self.mode_var, command=self._apply_mode,
+            ).pack(side="left", padx=6)
+
         # -- Load selection --------------------------------------------------
         load = ttk.LabelFrame(self, text="Load selection")
         load.pack(fill="x", padx=8, pady=4)
@@ -84,28 +107,50 @@ class EtabsExtractorApp(tk.Tk):
         ).pack(anchor="w", padx=14)
         opt = ttk.Frame(load)
         opt.pack(fill="x", padx=6, pady=3)
+        # Base-only controls (elevation + only-loaded) live in the same row as
+        # the shared toggles; they are removed individually in frame mode.
         self.elevation_field = LabeledEntry(load, "Elevation", "", width=14)
+        _reg(self._base_only, "elevation", self.elevation_field, side="left", padx=6, pady=3)
         self.elevation_field.pack(side="left", padx=6, pady=3)
         self.only_loaded_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opt, text="Only loaded supports", variable=self.only_loaded_var).pack(side="left", padx=8)
+        _ol_cb = ttk.Checkbutton(opt, text="Only loaded supports", variable=self.only_loaded_var)
+        _reg(self._base_only, "only_loaded", _ol_cb, side="left", padx=8)
+        _ol_cb.pack(side="left", padx=8)
         self.run_analysis_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(opt, text="Run analysis", variable=self.run_analysis_var).pack(side="left", padx=8)
         self.attach_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             opt, text="Attach (not launch)", variable=self.attach_var
         ).pack(side="left", padx=8)
+        # Frame-only control: section + frame-object selector (hidden in base).
+        self.frame_field = LoadSelectionField(
+            load, label="Frames", title="Select frames",
+            empty_summary="all frames", kind_a="section", kind_b="frame",
+        )
+        _reg(self._frame_only, "frames", self.frame_field, fill="x", padx=6, pady=3)
 
-        # -- Plot settings ---------------------------------------------------
+        # -- Frame-force preview button (frame-mode only) --------------------
+        fprow = ttk.Frame(self)
+        ttk.Button(fprow, text="Frame force preview", command=self.on_open_frame_preview).pack(side="left", padx=4)
+        ttk.Label(fprow, text="View beam force diagrams (P, V2, M3) in a pop-up",
+                     foreground="#777", font=("", 8)).pack(side="left", padx=4)
+        _reg(self._frame_only, "frame_preview", fprow, fill="x", padx=8, pady=2)
+
+        # -- Plot settings (base-only) ----------------------------------------
         self.plot_settings = PlotSettingsFrame(self, self._settings)
+        _reg(self._base_only, "plot_settings", self.plot_settings, fill="x", padx=8, pady=4)
         self.plot_settings.pack(fill="x", padx=8, pady=4)
         self.plot_after_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
+        _pa_cb = ttk.Checkbutton(
             self, text="Plot after extract (save figures to output dir)",
             variable=self.plot_after_var,
-        ).pack(anchor="w", padx=14, pady=2)
+        )
+        _reg(self._base_only, "plot_after", _pa_cb, anchor="w", padx=14, pady=2)
+        _pa_cb.pack(anchor="w", padx=14, pady=2)
 
-        # -- CSV plotting (no ETABS) -----------------------------------------
+        # -- CSV plotting (no ETABS) — base-only -----------------------------
         csv = ttk.LabelFrame(self, text="Plot from existing CSV (no ETABS)")
+        _reg(self._base_only, "csv", csv, fill="x", padx=8, pady=4)
         csv.pack(fill="x", padx=8, pady=4)
         self.csv_field = FileField(
             csv, "CSV file", "", filetypes="CSV", patterns=("*.csv",)
@@ -118,14 +163,15 @@ class EtabsExtractorApp(tk.Tk):
         )
         self.load_preview_btn.pack(side="left")
 
-        # -- Preview pop-up trigger (manual) -------------------------------
-        # The plan-view preview now lives in a separate pop-up window
+        # -- Preview pop-up trigger (manual, base-only) ----------------------
+        # The plan-view preview lives in a separate pop-up window
         # (PlotPreviewWindow); the main window only holds an opener button.
         prow = ttk.Frame(self)
+        _reg(self._base_only, "preview", prow, fill="x", padx=8, pady=4)
         prow.pack(fill="x", padx=8, pady=4)
         ttk.Button(prow, text="Plot preview", command=self.on_open_preview).pack(side="left", padx=4)
         ttk.Label(prow, text="Open the plot preview in a separate pop-up window",
-                  foreground="#777", font=("", 8)).pack(side="left", padx=4)
+                     foreground="#777", font=("", 8)).pack(side="left", padx=4)
 
         # -- Actions + progress ----------------------------------------------
         self.progress = ttk.Progressbar(self, mode="determinate", maximum=100, value=0)
@@ -141,16 +187,41 @@ class EtabsExtractorApp(tk.Tk):
         ttk.Button(actions, text="Quit", command=self.destroy).pack(side="right")
 
     # --------------------------------------------------------------- settings
+    def _apply_mode(self) -> None:
+        """Show/hide mode-scoped widgets as the extract-mode radio changes.
+
+        ``base`` shows the base-only controls (elevation, only-loaded, plot
+        settings, CSV, preview) and hides the frame selector; ``frame`` does the
+        reverse.
+        """
+        base = self.mode_var.get() == "base"
+        self._apply_group(self._base_only if base else self._frame_only, show=True)
+        self._apply_group(self._frame_only if base else self._base_only, show=False)
+
+    def _apply_group(self, group: dict, *, show: bool) -> None:
+        for _widget, _kwargs in group.values():
+            try:
+                if show:
+                    _widget.pack(** _kwargs)
+                else:
+                    _widget.pack_forget()
+            except tk.TclError:
+                pass
+
     def _collect_settings(self, *, not_plot: bool = False) -> GuiSettings:
         s = GuiSettings()
         s.model_path = self.model_field.get()
         s.output_dir = self.output_field.get()
         s.tag = self.tag_field.get()
+        s.extract_mode = self.mode_var.get()
         s.selected_combos, s.selected_cases = self.load_field.get_selected()
-        s.elevation = self.elevation_field.get()
-        s.only_loaded = self.only_loaded_var.get()
         s.run_analysis = self.run_analysis_var.get()
         s.attach = self.attach_var.get()
+        if s.extract_mode == "frame":
+            s.selected_sections, s.selected_frames = self.frame_field.get_selected()
+            return s
+        s.elevation = self.elevation_field.get()
+        s.only_loaded = self.only_loaded_var.get()
         s.csv_path = self.csv_field.get()
         s.plot_after_extract = self.plot_after_var.get()
         self.plot_settings.to_settings(s)
@@ -182,6 +253,8 @@ class EtabsExtractorApp(tk.Tk):
             model_path = value.get("model_path") or ""
             combos = list(value.get("combos") or [])
             cases = list(value.get("cases") or [])
+            sections = list(value.get("sections") or [])
+            frames = list(value.get("frames") or [])
             if model_path:
                 self.model_field.set(model_path)
                 self.model_status.set(f"Active: {model_path}")
@@ -191,10 +264,13 @@ class EtabsExtractorApp(tk.Tk):
                 self._set_log("No active model filename returned.")
             # Populate the load dropdown with the model's combos/cases.
             self.load_field.set_items(combos, cases)
+            # Populate the frame-mode selector with sections + frames.
+            self.frame_field.set_items(sections, frames)
             n_combos = len(combos)
             n_cases = len(cases)
             self._set_log(
-                f"Active model has {n_combos} combo(s) and {n_cases} case(s)."
+                f"Active model has {n_combos} combo(s), {n_cases} case(s), "
+                f"{len(frames)} frame(s), {len(sections)} section(s)."
             )
         else:
             err = str(value) if value else "unknown error"
@@ -226,14 +302,17 @@ class EtabsExtractorApp(tk.Tk):
         self._set_progress(100)
         df = result.get("df")
         load_names = result.get("load_names") or []
+        mode = self.mode_var.get()
         if df is not None and len(df) > 0:
+            unit = "rows" if mode == "base" else "force records"
             self._set_log(
-                f"Extracted {len(df)} reaction rows across {len(load_names)} load(s)."
+                f"Extracted {len(df)} {unit} across {len(load_names)} load(s)."
             )
         else:
             self._set_log("Extraction produced no rows.")
-        # Refresh an open preview pop-up with the new result (manual only).
+        # Refresh any open preview pop-ups with the new result.
         self._refresh_preview(result)
+        self._refresh_frame_preview(result)
         plot_paths = result.get("plot_paths") or []
         nrows = len(df) if df is not None else 0
         self._set_log(f"Extracted {nrows} rows; saved {len(plot_paths)} figure(s).")
@@ -297,14 +376,51 @@ class EtabsExtractorApp(tk.Tk):
         )
 
     def _refresh_preview(self, result: dict) -> None:
-        """Point an already-open preview pop-up at the latest result.
-
-        Manual only: this never *opens* the pop-up -- it only updates one
-        that the user already opened via ``Plot preview``.
-        """
+        """Point an already-open preview pop-up at the latest result."""
         win = getattr(self, "_preview_win", None)
         if win is not None and win.is_alive():
             win.set_result(result)
+
+    # ---------------------------------------------------------------- frame preview
+
+    def on_open_frame_preview(self) -> None:
+        """Open (or re-raise) the frame-force diagram preview pop-up."""
+        if self._frame_preview_win is not None and self._frame_preview_win.is_alive():
+            self._frame_preview_win.lift()
+            if self._result is not None:
+                self._frame_preview_win.set_result(self._result)
+            return
+        self._frame_preview_win = FramePreviewWindow(
+            self,
+            figure_builder=self._build_frame_preview_figure,
+            log=self._set_log,
+            closed=self._on_frame_preview_closed,
+        )
+        if self._result is not None:
+            self._frame_preview_win.set_result(self._result)
+
+    def _on_frame_preview_closed(self, window) -> None:
+        if self._frame_preview_win is window:
+            self._frame_preview_win = None
+
+    def _build_frame_preview_figure(self, df, frame, load_name, section, *,
+                                    step_type=None):
+        """Build a 3-panel beam force diagram figure (P, V2, M3).
+
+        ``beam_viewer.py`` lives at the repo root (one level up from
+        ``etabs_extractor/``), so we add its parent to ``sys.path``
+        before importing.
+        """
+        import os as _os
+        import sys as _sys
+        _repo_root = _os.path.abspath(
+            _os.path.join(_os.path.dirname(__file__), "..", "..")
+        )
+        if _repo_root not in _sys.path:
+            _sys.path.insert(0, _repo_root)
+        from beam_viewer import build_frame_figure  # noqa: PLC0415
+        return build_frame_figure(df, frame, load_name, section,
+                                  step_type=step_type)
 
     # -------------------------------------------------------- worker draining
     def _drain_pending(self, limit: int = 50000) -> None:

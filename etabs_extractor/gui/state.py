@@ -30,6 +30,11 @@ class GuiSettings:
     run_analysis: bool = False
     attach: bool = True
 
+    # Extraction mode ("base" reactions vs "frame" forces) + frame selectors
+    extract_mode: str = "base"
+    selected_sections: list[str] = field(default_factory=list)
+    selected_frames: list[str] = field(default_factory=list)
+
     # CSV plotting (no ETABS)
     csv_path: str = ""
 
@@ -54,6 +59,9 @@ DEFAULTS = GuiSettings()
 
 # Accepted plot formats for the GUI dropdown.
 FORMATS: tuple[str, ...] = ("png", "pdf", "svg")
+
+# Accepted extraction modes for the GUI mode switch.
+MODE_CHOICES: tuple[str, ...] = ("base", "frame")
 
 # Accepted unit systems for the GUI dropdown (must match plots.UNITS keys).
 UNITS_CHOICES: tuple[str, ...] = ("model", "kN-m")
@@ -138,23 +146,43 @@ class LoadSelectionModel:
         self,
         combos: list[str] | None = None,
         cases: list[str] | None = None,
+        kind_a: str = "combo",
+        kind_b: str = "case",
     ) -> None:
+        self._kind_a = kind_a
+        self._kind_b = kind_b
         self._items: list[_LoadItem] = []
         if combos:
-            self._items.extend(_LoadItem(name=n, kind="combo") for n in combos)
+            self._items.extend(_LoadItem(name=n, kind=kind_a) for n in combos)
         if cases:
-            self._items.extend(_LoadItem(name=n, kind="case") for n in cases)
+            self._items.extend(_LoadItem(name=n, kind=kind_b) for n in cases)
 
     # ------------------------------------------------------------------ rows
-    def set_items(self, combos: list[str], cases: list[str]) -> None:
-        """Replace the item list with distinct combo + case lists.
+    def set_items(
+        self,
+        combos: list[str],
+        cases: list[str],
+        kind_a: str | None = None,
+        kind_b: str | None = None,
+    ) -> None:
+        """Replace the item list with distinct group-a + group-b lists.
 
-        Selection flags are dropped on re-populate (a fresh model)."""
+        ``kind_a``/``kind_b`` may override the group kinds (defaults kept
+        when passed as ``None``). Selection flags are dropped on
+        re-populate (a fresh model)."""
+        if kind_a is not None:
+            self._kind_a = kind_a
+        if kind_b is not None:
+            self._kind_b = kind_b
         self._items = []
         if combos:
-            self._items.extend(_LoadItem(name=n, kind="combo") for n in combos)
+            self._items.extend(
+                _LoadItem(name=n, kind=self._kind_a) for n in combos
+            )
         if cases:
-            self._items.extend(_LoadItem(name=n, kind="case") for n in cases)
+            self._items.extend(
+                _LoadItem(name=n, kind=self._kind_b) for n in cases
+            )
 
     def items(self):
         """Return all items (raw, unfiltered)."""
@@ -162,11 +190,11 @@ class LoadSelectionModel:
 
     @property
     def all_combos(self) -> list[str]:
-        return [it.name for it in self._items if it.kind == "combo"]
+        return [it.name for it in self._items if it.kind == self._kind_a]
 
     @property
     def all_cases(self) -> list[str]:
-        return [it.name for it in self._items if it.kind == "case"]
+        return [it.name for it in self._items if it.kind == self._kind_b]
 
     # ---------------------------------------------------------------- filter
     def matches(self, query: str):
@@ -196,10 +224,11 @@ class LoadSelectionModel:
         return False
 
     def get_selected(self) -> tuple[list[str], list[str]]:
-        """Return ``(selected_combos, selected_cases)`` from the model."""
-        combos = [it.name for it in self._items if it.kind == "combo" and it.selected]
-        cases = [it.name for it in self._items if it.kind == "case" and it.selected]
-        return combos, cases
+        """Return ``(selected_a, selected_b)`` from the model (the two configured
+        groups, e.g. combos/cases or sections/frames)."""
+        a = [it.name for it in self._items if it.kind == self._kind_a and it.selected]
+        b = [it.name for it in self._items if it.kind == self._kind_b and it.selected]
+        return a, b
 
     def clear(self) -> None:
         for it in self._items:

@@ -272,6 +272,48 @@ class EtabsSession:
             pass
         return ""
 
+
+    def get_frame_length_mm(self, frame: str) -> float | None:
+        """Return the Euclidean length of a frame object in model length units (mm).
+
+        Uses ``FrameObj.GetPoints`` → start/end point names, then
+        ``PointObj.GetCoordCartesian`` for each point's coordinates, and
+        computes ``sqrt((Δx)² + (Δy)² + (Δz)²)``.
+        Returns ``None`` when any coordinate is unresolvable (best-effort).
+        """
+        import math  # noqa: PLC0415  # standard library, fine
+
+        try:
+            out = self.sap_model.FrameObj.GetPoints(frame)
+            p1, p2 = str(out[0]), str(out[1])
+        except Exception:  # noqa: BLE001  # best-effort
+            return None
+        try:
+            c1 = self.sap_model.PointObj.GetCoordCartesian(p1)
+            c2 = self.sap_model.PointObj.GetCoordCartesian(p2)
+        except Exception:  # noqa: BLE001  # best-effort
+            return None
+        try:
+            x1, y1, z1 = float(c1[0]), float(c1[1]), float(c1[2])
+            x2, y2, z2 = float(c2[0]), float(c2[1]), float(c2[2])
+            return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2 + (z2 - z1) ** 2)
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    def get_frame_section_names(self) -> list[str]:
+        """Return the list of distinct frame property names.
+
+        Uses ``PropFrame.GetNameList`` (same ``_gp`` pattern as
+        ``FrameObj.GetNameList``). COM stays quarantined here.
+        """
+        try:
+            count, names = _gp(self.sap_model.PropFrame.GetNameList)
+        except Exception as exc:  # noqa: BLE001
+            raise EtabsConnectionError(
+                f"PropFrame.GetNameList failed: {exc}"
+            ) from exc
+        return list(names or [])
+
     def setup_select_loads(self, combos: list[str] | None, cases: list[str] | None) -> None:
         """Select the given ``combos`` and ``cases`` for output.
 

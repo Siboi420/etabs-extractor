@@ -119,7 +119,20 @@ class _FakeFrameObj:
         return 0
 
     def GetSection(self, Name):
+
         return (0, self.sections.get(Name, ""))
+
+
+class _FakePropFrame:
+    """Mirrors ``PropFrame.GetNameList`` (frame section property names)."""
+
+    def __init__(self, names: list[str]) -> None:
+        self.names = names
+
+    def GetNameList(self, NumberNames, MyName):
+        NumberNames = len(self.names)
+        MyName[:] = self.names
+        return 0
 
 
 class _FakeRespCombo:
@@ -227,11 +240,17 @@ class _FakeSapModel:
     """Full fake exposing the EtabsSession surface used by extract_forces."""
 
     def __init__(self, *, frames, sections, combos, cases, data_by_frame,
-                 point_names, point_coords,
+                 point_names, point_coords, prop_sections=None,
                  model_filename: str = "D:\\Models\\synthetic_model.EDB"):
         self.File = _FakeFile(model_filename=model_filename)
         self.Analyze = _FakeAnalyze()
         self.FrameObj = _FakeFrameObj(frames, sections)
+        # Distinct frame property (section) names; only those actually in use
+        # are listed (sections field holds the per-frame mapping).
+        self.PropFrame = _FakePropFrame(
+            prop_sections if prop_sections is not None
+            else sorted(dict.fromkeys(sections.values()))
+        )
         self.RespCombo = _FakeRespCombo(combos)
         self.LoadCases = _FakeLoadCases(cases)
         self.PointObj = _FakePointObj(point_names, point_coords)
@@ -269,6 +288,13 @@ class _FakeSession(_extractor_connection.EtabsSession):
 
     def get_section_for_frame(self, frame):
         return self.sap_model.FrameObj.sections.get(frame, "")
+
+    def get_frame_section_names(self):
+        return list(self.sap_model.PropFrame.names or [])
+
+    def get_frame_length_mm(self, frame):
+        """Return a fake length for any frame."""
+        return 5000.0
 
     def get_point_names(self):
         return self.sap_model.PointObj.names
@@ -364,19 +390,19 @@ def _build_frame_synthetic():
     cases = ["Dead", "Live"]
     data_by_frame = {
         "B1": [
-            {"station": 0.0, "load": "ASD 1", "P": -10.0, "V2": 1.0, "V3": 2.0, "T": 0.1, "M2": 5.0, "M3": 20.0},
-            {"station": 1000.0, "load": "ASD 1", "P": -9.0, "V2": 0.5, "V3": 1.5, "T": 0.2, "M2": 4.0, "M3": 15.0},
+            {"station": 0.0, "load": "ASD 1", "step": "Max", "P": -10.0, "V2": 1.0, "V3": 2.0, "T": 0.1, "M2": 5.0, "M3": 20.0},
+            {"station": 1000.0, "load": "ASD 1", "step": "Min", "P": -9.0, "V2": 0.5, "V3": 1.5, "T": 0.2, "M2": 4.0, "M3": 15.0},
             {"station": 0.0, "load": "LRFD 1", "P": -15.0, "V2": 1.5, "V3": 3.0, "T": 0.3, "M2": 6.0, "M3": 30.0},
             {"station": 0.0, "load": "Dead", "P": -6.0, "V2": 0.6, "V3": 1.0, "T": 0.05, "M2": 2.5, "M3": 10.0},
             {"station": 0.0, "load": "Live", "P": -4.0, "V2": 0.3, "V3": 0.7, "T": 0.02, "M2": 1.5, "M3": 6.0},
         ],
         "B2": [
-            {"station": 0.0, "load": "ASD 1", "P": -5.0, "V2": 0.2, "V3": 0.8, "T": 0.0, "M2": 2.0, "M3": 8.0},
+            {"station": 0.0, "load": "ASD 1", "step": "Max", "P": -5.0, "V2": 0.2, "V3": 0.8, "T": 0.0, "M2": 2.0, "M3": 8.0},
             {"station": 1200.0, "load": "LRFD 1", "P": -8.0, "V2": 0.4, "V3": 1.0, "T": 0.1, "M2": 3.0, "M3": 12.0},
             {"station": 0.0, "load": "Dead", "P": -3.0, "V2": 0.1, "V3": 0.4, "T": 0.0, "M2": 1.0, "M3": 4.0},
         ],
         "C1": [
-            {"station": 0.0, "load": "ASD 1", "P": -100.0, "V2": 5.0, "V3": 6.0, "T": 1.0, "M2": 10.0, "M3": 50.0},
+            {"station": 0.0, "load": "ASD 1", "step": "Min", "P": -100.0, "V2": 5.0, "V3": 6.0, "T": 1.0, "M2": 10.0, "M3": 50.0},
             {"station": 0.0, "load": "Live", "P": -50.0, "V2": 2.0, "V3": 3.0, "T": 0.5, "M2": 5.0, "M3": 25.0},
         ],
     }
@@ -451,8 +477,12 @@ def run():
 
         assert isinstance(df, pd.DataFrame), "expected consolidated DataFrame"
         assert list(df.columns) == [
-            "frame", "section", "station", "load_name", "load_kind",
-            "P", "V2", "V3", "T", "M2", "M3", "obj_sta", "elm", "elm_sta",
+            "frame", "section", "station",
+            "load_name", "load_kind",
+            "step_type",
+            "P", "V2", "V3", "T", "M2", "M3",
+            "length_mm",
+            "obj_sta", "elm", "elm_sta",
         ], f"column order mismatch: {list(df.columns)}"
 
         # Combos-only by default: every row must be load_kind COMBO.
@@ -480,10 +510,54 @@ def run():
         # Per-combo CSV files.
         combo_dir = out
         combo_files = [f for f in os.listdir(combo_dir) if f.startswith("combo_")]
-        assert len(combo_files) == len(combos), combo_files
+        # Split MIN/MAX files are additional per-combo CSVs beyond the combos.
+        assert len(combo_files) == len(combos) + 2, combo_files
         for c in combos:
             safe = c.replace(" ", "_")
             assert (combo_dir / f"combo_{safe}.csv").exists(), safe
+
+        # Frame per-load MIN/MAX split files: "ASD 1" carries Max/Min steps
+        # in B1, B2 (Max) and C1 (Min); "LRFD 1" is plain -> no split files.
+        assert (out / "combo_ASD_1_min.csv").exists(), "ASD 1 _min split not written"
+        assert (out / "combo_ASD_1_max.csv").exists(), "ASD 1 _max split not written"
+        assert not (out / "combo_LRFD_1_min.csv").exists(), "LRFD 1 has no steps; _min must not be written"
+        assert not (out / "combo_LRFD_1_max.csv").exists(), "LRFD 1 has no steps; _max must not be written"
+
+        # Split files keep COLUMNS and their row counts sum to the mixed file.
+        asd_mixed_df = pd.read_csv(out / "combo_ASD_1.csv", encoding="utf-8")
+        asd_min_df = pd.read_csv(out / "combo_ASD_1_min.csv", encoding="utf-8")
+        asd_max_df = pd.read_csv(out / "combo_ASD_1_max.csv", encoding="utf-8")
+        assert list(asd_min_df.columns) == list(df.columns), "split _min column mismatch"
+        assert list(asd_max_df.columns) == list(df.columns), "split _max column mismatch"
+        assert len(asd_min_df) + len(asd_max_df) == len(asd_mixed_df), \
+            (len(asd_min_df), len(asd_max_df), len(asd_mixed_df))
+        assert set(asd_min_df["step_type"].fillna("").astype(str).unique()) == {"Min"}
+        assert set(asd_max_df["step_type"].fillna("").astype(str).unique()) == {"Max"}
+        # The mixed per-load file contains both Min and Max steps.
+        assert set(asd_mixed_df["step_type"].fillna("").astype(str).unique()) >= {"Min", "Max"}
+
+        # Section filter: AND-combines with frames, each optional.
+        sdf, _sp, _sr = extract_forces(
+            "synthetic_model.$et", None,
+            session=session, sections=["COL1"],
+        )
+        assert set(sdf["frame"].unique()) == {"C1"}, set(sdf["frame"].unique())
+        sdf2, _, _ = extract_forces(
+            "synthetic_model.$et", None,
+            session=session, sections=["B1", "B2"],
+        )
+        assert set(sdf2["frame"].unique()) == {"B1", "B2"}, set(sdf2["frame"].unique())
+        sdf3, _, _ = extract_forces(
+            "synthetic_model.$et", None,
+            session=session, frames=["B1"], sections=["B1"],
+        )
+        assert set(sdf3["frame"].unique()) == {"B1"}, set(sdf3["frame"].unique())
+        df_sec_sect, _, _ = extract_forces(
+            "synthetic_model.$et", None,
+            session=session, frames=["C1"], sections=["B1", "B2"],
+        )
+        assert len(df_sec_sect) == 0, "AND of disjoint frames/sections must be empty"
+
 
         # Envelope summary exists and has expected shape.
         env_csv = out / "envelope_summary.csv"
@@ -680,6 +754,9 @@ def run():
         for c in combos:
             safe = c.replace(" ", "_")
             assert (tagged_dir / f"combo_{safe}_KH13.csv").exists(), c
+        # Frame split files carry the tag suffix too.
+        assert (tagged_dir / "combo_ASD_1_min_KH13.csv").exists()
+        assert (tagged_dir / "combo_ASD_1_max_KH13.csv").exists()
         # Tagged plot figures.
         from etabs_extractor.plots import plot_base_reactions
         tg_plot = plot_base_reactions(bdf, tagged_dir, tag="KH13")

@@ -17,23 +17,49 @@ from etabs_extractor.gui.state import (
 from etabs_extractor.io import _sanitize_filename
 
 
-def build_extract_kwargs(settings: GuiSettings) -> dict:
-    """Return the keyword arguments for ``extract_base_reactions``."""
-    combos = settings.selected_combos or None
-    cases = settings.selected_cases or None
-    elevation = parse_elevation(settings.elevation) if settings.elevation.strip() else None
+def build_mode_kwargs(settings: GuiSettings) -> dict:
+    """Return the keyword args for the active extraction mode's library call.
+
+    ``base`` -> :func:`extract_base_reactions` kwargs (today's mapping);
+    ``frame`` -> :func:`extract_forces` kwargs with ``frames``/``sections``.
+    """
+    if settings.extract_mode == "frame":
+        combos = settings.selected_combos or None
+        cases = settings.selected_cases or None
+        return {
+            "model_path": settings.model_path or None,
+            "output_dir": settings.output_dir or None,
+            "combos": combos,          # empty/None -> all model combos
+            "cases": cases,
+            "frames": settings.selected_frames or None,
+            "sections": settings.selected_sections or None,
+            "run_analysis": settings.run_analysis,
+            "attach": settings.attach,
+            "launch": not settings.attach,
+            "tag": settings.tag or None,
+        }
     return {
         "model_path": settings.model_path or None,
         "output_dir": settings.output_dir or None,
-        "combos": combos,          # empty/None -> all model combos
-        "cases": cases,
-        "elevation": elevation,
+        "combos": settings.selected_combos or None,
+        "cases": settings.selected_cases or None,
+        "elevation": (
+            parse_elevation(settings.elevation)
+            if settings.elevation.strip()
+            else None
+        ),
         "only_loaded": settings.only_loaded,
         "run_analysis": settings.run_analysis,
         "attach": settings.attach,
         "launch": not settings.attach,
         "tag": settings.tag or None,
     }
+
+
+def build_extract_kwargs(settings: GuiSettings) -> dict:
+    """Return the keyword arguments for the extracted library call of the
+    active mode (backwards-compatible alias of :func:`build_mode_kwargs`)."""
+    return build_mode_kwargs(settings)
 
 
 def build_plot_kwargs(settings: GuiSettings) -> dict:
@@ -78,22 +104,34 @@ def sanitize_tag(tag: str) -> str:
 
 
 def do_extract(settings: GuiSettings) -> dict:
-    """Run a full extract+plot workflow and return a result dict.
+    """Run a full extract workflow and return a result dict.
 
-    Calls ``results.extract_base_reactions`` with the settings-derived
-    kwargs, optionally plots the figures (when ``plot_after_extract``), and
-    returns:
+    Dispatches on ``settings.extract_mode``: ``base`` calls
+    ``results.extract_base_reactions`` (+ optional plot); ``frame`` calls
+    ``results.extract_forces`` and never plots (plot stays base-only). Returns:
 
     ``{"df": DataFrame, "per_load": dict, "records": list,
         "output_dir": str|None, "tag": str, "load_names": list[str],
         "plot_paths": list[Path]}``
-
-    The returned ``df`` / ``per_load`` make the preview/envelope renders
-    possible without re-reading ETABS.
     """
+    kwargs = build_extract_kwargs(settings)
+
+    if settings.extract_mode == "frame":
+        from etabs_extractor.results import extract_forces
+
+        df, per_load, records = extract_forces(**kwargs)
+        return {
+            "df": df,
+            "per_load": per_load,
+            "records": records,
+            "output_dir": kwargs.get("output_dir"),
+            "tag": kwargs.get("tag"),
+            "load_names": list(per_load.keys()) if per_load else [],
+            "plot_paths": [],
+        }
+
     from etabs_extractor.results import extract_base_reactions
 
-    kwargs = build_extract_kwargs(settings)
     df, per_load, records = extract_base_reactions(**kwargs)
 
     plot_paths = []
@@ -169,23 +207,37 @@ def check_active_model(attach: bool = True, session=None) -> str:
 
 def inspect_active_model(attach: bool = True, session=None) -> dict:
     """Attach (or reuse) an ETABS session and return the active model's
-    inventory: ``{"model_path", "combos", "cases"}``.
+    inventory: ``{"model_path", "combos", "cases", "sections", "frames"}``.
 
     When ``session`` is ``None`` a real COM session is attached (or launched
     when ``attach`` is False); otherwise the provided duck-typed session (e.g.
     a test fake) is used directly.  Reads ``get_model_filename`` /
-    ``get_combo_names`` / ``get_case_names``."""
+    ``get_combo_names`` / ``get_case_names``, plus best-effort
+    ``get_frame_section_names`` / ``get_frame_names`` (degrades to ``[]``)."""
     from etabs_extractor.connection import EtabsSession
 
     own = session is None
     if own:
         session = EtabsSession.connect(attach=attach, launch=not attach)
     try:
-        return {
+        info = {
             "model_path": str(session.get_model_filename(include_path=True)),
             "combos": list(session.get_combo_names() or []),
             "cases": list(session.get_case_names() or []),
         }
+        for key, meth in (
+            ("sections", "get_frame_section_names"),
+            ("frames", "get_frame_names"),
+        ):
+            try:
+                info[key] = list(getattr(session, meth)() or [])
+            except Exception as exc:  # noqa: BLE001 - best-effort inventory
+                import logging
+                logging.getLogger(__name__).debug(
+                    "Could not list %s: %s", key, exc
+                )
+                info[key] = []
+        return info
     except Exception as exc:  # noqa: BLE001 - root-cause tooltip
         raise RuntimeError(f"Could not inspect active model: {exc}") from exc
     finally:

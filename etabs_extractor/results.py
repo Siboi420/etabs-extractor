@@ -28,6 +28,7 @@ from .io import (
     write_base_step_csv,
     write_csv,
     write_envelope_csv,
+    write_frame_step_csv,
 )
 from .models import (
     FrameForceRecord,
@@ -305,6 +306,7 @@ def _read_frame_forces(
     ) = raw
 
     section = session.get_section_for_frame(frame) or ""
+    length_mm = session.get_frame_length_mm(frame)
 
     records: list[FrameForceRecord] = []
     # NumberResults is a COM by-ref scalar; coerce via len for list-like
@@ -326,6 +328,7 @@ def _read_frame_forces(
                 frame=frame,
                 section=section,
                 station=_f(ObjSta, i, default=0.0),
+                length_mm=length_mm,
                 load_name=name,
                 load_kind=kind,
                 axial=_f(P, i),
@@ -337,6 +340,7 @@ def _read_frame_forces(
                 obj_sta=_f_optional(ObjSta, i),
                 elm=str(Elm[i]) if Elm is not None and i < len(Elm) else None,
                 elm_sta=_f_optional(ElmSta, i),
+                step_type=_s(StepType, i),
             )
         )
     return records
@@ -451,10 +455,22 @@ def _is_null_reaction(r: JointReactionRecord, tol: float = 1e-9) -> bool:
 
 
 def _write_frame_csvs(records, grouped, output_dir, tag) -> None:
-    """Per-load + consolidated + envelope CSVs for frame forces."""
+    """Per-load (+ MIN/MAX step splits) + consolidated + envelope CSVs for
+    frame forces.
+
+    Each load's rows are partitioned by ETABS StepType ("Max"/"Min"); rows
+    with any other step stay only in the mixed per-load file.  A split file is
+    written only when it has rows.
+    """
     for name, recs in grouped.items():
         kind = recs[0].load_kind if recs else "COMBO"
         write_csv(recs, output_dir, name, load_kind=kind, tag=tag)
+        for step_key in ("min", "max"):
+            split = [r for r in recs if _step_key(r.step_type) == step_key]
+            if split:
+                write_frame_step_csv(
+                    split, output_dir, name, load_kind=kind, step=step_key, tag=tag
+                )
     write_all_forces_csv(records, output_dir, tag=tag)
     write_envelope_csv(records, output_dir, tag=tag)
 
@@ -489,6 +505,29 @@ _FRAME_KIND = ExtractKind(
 )
 
 
+def _make_frame_reader(sections: "set[str] | None"):
+    """Return a per-frame reader for :class:`ExtractKind` (frame forces).
+
+    Captures an optional ``sections`` filter: a frame whose section (via
+    ``get_section_for_frame``) is not in the filter is skipped entirely (no
+    force read), mirroring :func:`_make_point_reader`.  ``None`` / empty
+    sections means no filter (all sections).
+    """
+
+    def _read(session, frame, combos, cases) -> list[FrameForceRecord]:
+        if sections is not None and len(sections) > 0:
+            try:
+                sec = session.get_section_for_frame(frame) or ""
+            except Exception as exc:  # noqa: BLE001 - section lookup best-effort
+                logger.debug("Section lookup failed for %r: %s", frame, exc)
+                return []
+            if sec not in sections:
+                return []
+        return _read_frame_forces(session, frame, combos, cases)
+
+    return _read
+
+
 def extract_forces(
     model_path: str | None = None,
     output_dir: str | None = None,
@@ -500,6 +539,7 @@ def extract_forces(
     launch: bool = False,
     run_analysis: bool = False,
     frames: list[str] | None = None,
+    sections: list[str] | None = None,
     session: "EtabsSession | None" = None,
     tag: str | None = None,
 ) -> tuple:
@@ -507,13 +547,28 @@ def extract_forces(
 
     Returns ``(consolidated_DataFrame, {load_name: DataFrame}, list[record])``.
     When ``output_dir`` is provided, per-load CSVs and ``all_forces.csv``
-    (plus an envelope summary) are written to it.
+    (plus an envelope summary) are written to it; per-load MIN/MAX split files
+    (``combo_<load>_min.csv`` / ``combo_<load>_max.csv``) are added when a load
+    is an envelope combo (Max/Min steps).
+
+    ``frames`` restricts the frame *objects* by name; ``sections`` restricts
+    by assigned section name (AND-combined when both given, each optional).
+    An empty/None section selection means no section filter.
 
     If a ``session`` is passed (e.g. the test fake), it is used directly and
     no COM connection is attempted; otherwise one is created.
     """
+    kind = _FRAME_KIND
+    if sections:
+        kind = ExtractKind(
+            label="frame",
+            get_names=lambda s: s.get_frame_names(),
+            read=_make_frame_reader(set(sections)),
+            to_df=to_dataframe,
+            write=_write_frame_csvs,
+        )
     return _extract(
-        _FRAME_KIND,
+        kind,
         model_path,
         output_dir,
         combos=combos,
@@ -693,6 +748,11 @@ def list_available(
         except Exception as exc:  # noqa: BLE001 - best-effort point inventory
             logger.debug("Could not list point objects: %s", exc)
             info["point_names"] = []
+        try:
+            info["section_names"] = session.get_frame_section_names()
+        except Exception as exc:  # noqa: BLE001 - best-effort section inventory
+            logger.debug("Could not list frame sections: %s", exc)
+            info["section_names"] = []
         return info
     finally:
         if own_session:
