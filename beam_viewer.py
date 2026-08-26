@@ -176,6 +176,18 @@ def _unit_label(col: str) -> str:
     return ""
 
 
+def _diagram_vals(vals: np.ndarray, col: str) -> np.ndarray:
+    """Return display values and fill signs for the given column.
+
+    For moment diagrams (M2, M3), values are **negated** so that
+    positive moment (sagging, tension at bottom) plots BELOW the
+    zero line, matching structural engineering convention.
+    """
+    if col in ("M2", "M3"):
+        return -vals
+    return vals
+
+
 def plot_beam_diagrams(
     beam_data: pd.DataFrame,
     frame: int | str,
@@ -193,6 +205,9 @@ def plot_beam_diagrams(
         ``"Max"`` or ``"Min"`` to show only that envelope step, or
         ``None`` to show all steps overlaid.  For non-envelope loads
         this is ignored and a single blue line is drawn.
+
+    Moment diagrams (M3) are inverted so positive moment (sagging) plots
+    BELOW the zero line, matching structural engineering convention.
     """
     groups = get_force_groups(beam_data)
 
@@ -209,26 +224,31 @@ def plot_beam_diagrams(
         ax.clear()
         label = _unit_label(col)
         col_name = {"P": "Axial (P)", "V2": "Shear (V2)", "M3": "Moment (M3)"}.get(col, col)
+        # Moment diagrams: positive plots below, so swap fill colors too
+        _pos_fill = "red" if col in ("M2", "M3") else "green"
+        _neg_fill = "green" if col in ("M2", "M3") else "red"
 
         all_v = np.array([])
         all_s = np.array([])
+
+        def _make_vals(grp):
+            raw = np.array([_scale_force(v, col) for v in grp[col].values])
+            return _diagram_vals(raw, col)
 
         if is_envelope and step_type:
             # Single step: plot only the requested step
             if step_type in groups:
                 grp = groups[step_type]
                 stations_m = grp["station"].values / 1000.0
-                vals = np.array([_scale_force(v, col) for v in grp[col].values])
+                vals = _make_vals(grp)
                 all_s, all_v = stations_m, vals
                 ax.plot(stations_m, vals, color="blue", linewidth=2.0,
                         marker="o", markersize=4, label=step_type)
-                ax.fill_between(
-                    stations_m, vals, 0,
-                    where=(vals >= 0), color="green", alpha=0.1,
+                ax.fill_between(stations_m, vals, 0,
+                    where=(vals >= 0), color=_pos_fill, alpha=0.1,
                 )
-                ax.fill_between(
-                    stations_m, vals, 0,
-                    where=(vals < 0), color="red", alpha=0.1,
+                ax.fill_between(stations_m, vals, 0,
+                    where=(vals < 0), color=_neg_fill, alpha=0.1,
                 )
                 ax.legend(loc="upper right", fontsize=8)
         elif is_envelope:
@@ -242,20 +262,18 @@ def plot_beam_diagrams(
                     continue
                 grp = groups[step_key]
                 stations_m = grp["station"].values / 1000.0
-                vals = np.array([_scale_force(v, col) for v in grp[col].values])
+                vals = _make_vals(grp)
                 if len(vals) == 0:
                     continue
                 all_s = np.concatenate([all_s, stations_m])
                 all_v = np.concatenate([all_v, vals])
                 ax.plot(stations_m, vals, color=color, linewidth=2.0,
                         marker="o", markersize=4, label=legend_label)
-                ax.fill_between(
-                    stations_m, vals, 0,
-                    where=(vals >= 0), color="green", alpha=0.06,
+                ax.fill_between(stations_m, vals, 0,
+                    where=(vals >= 0), color=_pos_fill, alpha=0.06,
                 )
-                ax.fill_between(
-                    stations_m, vals, 0,
-                    where=(vals < 0), color="red", alpha=0.06,
+                ax.fill_between(stations_m, vals, 0,
+                    where=(vals < 0), color=_neg_fill, alpha=0.06,
                 )
             if any(k in groups for k in ("Max", "Min")):
                 ax.legend(loc="upper right", fontsize=8)
@@ -263,17 +281,15 @@ def plot_beam_diagrams(
             # Single step: one clean blue line
             grp = next(iter(groups.values()))
             stations_m = grp["station"].values / 1000.0
-            vals = np.array([_scale_force(v, col) for v in grp[col].values])
+            vals = _make_vals(grp)
             all_s, all_v = stations_m, vals
             ax.plot(stations_m, vals, color="blue", linewidth=2.0,
                     marker="o", markersize=4)
-            ax.fill_between(
-                stations_m, vals, 0,
-                where=(vals >= 0), color="green", alpha=0.1,
+            ax.fill_between(stations_m, vals, 0,
+                where=(vals >= 0), color=_pos_fill, alpha=0.1,
             )
-            ax.fill_between(
-                stations_m, vals, 0,
-                where=(vals < 0), color="red", alpha=0.1,
+            ax.fill_between(stations_m, vals, 0,
+                where=(vals < 0), color=_neg_fill, alpha=0.1,
             )
 
         # Zero line
@@ -283,18 +299,22 @@ def plot_beam_diagrams(
         ax.set_xlabel("Position along beam [m]", fontsize=10)
         ax.grid(True, alpha=0.3)
 
-        # Annotate global max/min
+        # Annotate global max/min (undo diagram inversion so values show
+        # the original signed moment, not the negated plot coordinate)
         if len(all_v) > 0:
             max_idx = np.argmax(all_v)
             min_idx = np.argmin(all_v)
+            # Reverse negation for annotation display values
+            _ann_max = _diagram_vals(all_v[max_idx:max_idx+1], col)[0]
+            _ann_min = _diagram_vals(all_v[min_idx:min_idx+1], col)[0]
             ax.annotate(
-                f"Max: {all_v[max_idx]:.1f}",
+                f"Max: {_ann_max:.1f}",
                 xy=(all_s[max_idx], all_v[max_idx]),
                 xytext=(5, 10), textcoords="offset points",
                 fontsize=7, color="green", fontweight="bold",
             )
             ax.annotate(
-                f"Min: {all_v[min_idx]:.1f}",
+                f"Min: {_ann_min:.1f}",
                 xy=(all_s[min_idx], all_v[min_idx]),
                 xytext=(5, -15), textcoords="offset points",
                 fontsize=7, color="red", fontweight="bold",
