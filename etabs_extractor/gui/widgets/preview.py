@@ -9,8 +9,11 @@ Three pieces:
   a load dropdown, a ``Preview`` button, a ``Save preview image`` button and
   a :class:`PlotPreviewFrame` canvas for base-reaction plan views.
 
-* :class:`FramePreviewWindow` — a pop-up with load/section/beam dropdowns
-  for interactive beam force diagram previews after frame extraction.
+* :class:`FramePreviewWindow` — a pop-up with load/section/step/force-type/
+  length/beam dropdowns for interactive beam force diagram previews after
+  frame extraction.  Includes "Pick highest" (auto-select the beam with
+  the largest |force|) and "Batch plot all" (render all beams at the
+  selected length, sorted by descending peak |force|).
 """
 
 from __future__ import annotations
@@ -260,61 +263,82 @@ class FramePreviewWindow(tk.Toplevel):
         self,
         master,
         *,
-        figure_builder,       # (df, frame, load_name, section) -> Figure | None
+        figure_builder,         # (df, frame, load_name, section, step_type) -> Figure | None
+        batch_figure_builder,   # (df, load_name, section, length_mm, force_col, step_type) -> Figure | None
         log=None,
         closed=None,
     ) -> None:
         super().__init__(master)
         self.title("Frame force preview")
-        self.geometry("780x600")
-        self.minsize(560, 420)
+        self.geometry("820x620")
+        self.minsize(600, 440)
         self.transient(master)
         self._figure_builder = figure_builder
+        self._batch_figure_builder = batch_figure_builder
         self._log = log
         self._closed = closed
         self._df: pd.DataFrame | None = None
         self._current_fig = None
+        self._length_map: dict[str, float] = {}
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        import pandas as pd  # noqa: PLC0415
-
-        # -- Selector row: Load, Section, Step, Length, Beam ---------------
+        # -- Selector row: Load, Section, Step, Force, Length, Beam ---------
         top = ttk.Frame(self)
         top.pack(fill="x", padx=8, pady=6)
 
         ttk.Label(top, text="Load:").pack(side="left")
-        self.load_combo = ttk.Combobox(top, state="readonly", width=22)
+        self.load_combo = ttk.Combobox(top, state="readonly", width=18)
         self.load_combo.pack(side="left", padx=4)
 
-        ttk.Label(top, text="Section:").pack(side="left", padx=(10, 0))
-        self.section_combo = ttk.Combobox(top, state="readonly", width=10)
+        ttk.Label(top, text="Section:").pack(side="left", padx=(8, 0))
+        self.section_combo = ttk.Combobox(top, state="readonly", width=8)
         self.section_combo.pack(side="left", padx=4)
         self.section_combo.bind("<<ComboboxSelected>>", self._on_section_change)
 
-        ttk.Label(top, text="Step:").pack(side="left", padx=(10, 0))
-        self.step_combo = ttk.Combobox(top, state="readonly", width=8,
+        ttk.Label(top, text="Step:").pack(side="left", padx=(8, 0))
+        self.step_combo = ttk.Combobox(top, state="readonly", width=7,
                                        values=("Both", "Max", "Min"))
         self.step_combo.pack(side="left", padx=4)
         self.step_combo.current(0)
 
-        ttk.Label(top, text="Length:").pack(side="left", padx=(10, 0))
-        self.length_combo = ttk.Combobox(top, state="readonly", width=10)
+        ttk.Label(top, text="Force:").pack(side="left", padx=(8, 0))
+        self.force_combo = ttk.Combobox(
+            top, state="readonly", width=10,
+            values=("Moment (M3)", "Shear (V2)", "Axial (P)"),
+        )
+        self.force_combo.pack(side="left", padx=4)
+        self.force_combo.current(0)
+
+        ttk.Label(top, text="Length:").pack(side="left", padx=(8, 0))
+        self.length_combo = ttk.Combobox(top, state="readonly", width=9)
         self.length_combo.pack(side="left", padx=4)
         self.length_combo.bind("<<ComboboxSelected>>", self._on_length_change)
 
-        ttk.Label(top, text="Beam:").pack(side="left", padx=(10, 0))
+        ttk.Label(top, text="Beam:").pack(side="left", padx=(8, 0))
         self.beam_combo = ttk.Combobox(top, state="readonly", width=8)
         self.beam_combo.pack(side="left", padx=4)
 
-        # -- Buttons ----------------------------------------------------------
-        btn_frame = ttk.Frame(self)
-        btn_frame.pack(fill="x", padx=8, pady=(0, 4))
-        ttk.Button(btn_frame, text="Preview", command=self._render_current).pack(side="left", padx=4)
-        ttk.Button(btn_frame, text="Refresh", command=self._refresh_settings).pack(side="left", padx=4)
-        ttk.Button(btn_frame, text="Save preview image", command=self._save_preview).pack(side="left", padx=4)
+        # -- Button row 1: Preview / Refresh / Pick highest / Save ----------
+        btn1 = ttk.Frame(self)
+        btn1.pack(fill="x", padx=8, pady=(0, 2))
+        ttk.Button(btn1, text="Preview", command=self._render_current).pack(side="left", padx=4)
+        ttk.Button(btn1, text="Refresh", command=self._refresh_settings).pack(side="left", padx=4)
+        ttk.Button(btn1, text="Pick highest", command=self._pick_highest).pack(side="left", padx=4)
+        ttk.Button(btn1, text="Save preview image", command=self._save_preview).pack(side="left", padx=4)
+
+        # -- Button row 2: Batch plot all -----------------------------------
+        btn2 = ttk.Frame(self)
+        btn2.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Button(btn2, text="Batch plot all (sorted by peak force)",
+                   command=self._batch_plot).pack(side="left", padx=4)
+        ttk.Label(
+            btn2, text="Diagrams for every beam at the selected length, "
+                       "sorted by descending |force|",
+            foreground="#777", font=("", 8),
+        ).pack(side="left", padx=4)
 
         # -- Canvas -----------------------------------------------------------
-        self.preview = PlotPreviewFrame(self, width=680, height=480)
+        self.preview = PlotPreviewFrame(self, width=720, height=500)
         self.preview.pack(fill="both", expand=True, padx=8, pady=4)
 
     # ------------------------------------------------------------------ api
@@ -346,15 +370,26 @@ class FramePreviewWindow(tk.Toplevel):
 
         self._render_current()
 
+    # ----------------------------------------------------------------- force
+    @property
+    def _force_col(self) -> str:
+        """Map the force-combo label to a DataFrame column name."""
+        label = self.force_combo.get()
+        return {"Moment (M3)": "M3", "Shear (V2)": "V2", "Axial (P)": "P"}.get(label, "M3")
+
     def _populate_lengths(self) -> None:
         """Fill the length dropdown from the selected section."""
         section = self.section_combo.get()
         if not section or self._df is None:
             self.length_combo.configure(values=[])
             return
+        import sys as _sys
+        import os as _os
+        _repo = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
+        if _repo not in _sys.path:
+            _sys.path.insert(0, _repo)
         from beam_viewer import get_lengths_for_section  # noqa: PLC0415
         lengths = get_lengths_for_section(self._df, section)
-        # Display as metres with 2 decimal places
         labels = [f"{l/1000:.2f}m" for l in lengths]
         self._length_map = dict(zip(labels, lengths))
         self.length_combo.configure(values=labels)
@@ -367,6 +402,11 @@ class FramePreviewWindow(tk.Toplevel):
             self.beam_combo.configure(values=[])
             return
         length_mm = self._length_map.get(length_label, 0)
+        import sys as _sys
+        import os as _os
+        _repo = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
+        if _repo not in _sys.path:
+            _sys.path.insert(0, _repo)
         from beam_viewer import get_frames_for_length  # noqa: PLC0415
         frames = get_frames_for_length(self._df, section, length_mm)
         self.beam_combo.configure(values=frames)
@@ -386,10 +426,87 @@ class FramePreviewWindow(tk.Toplevel):
             self.beam_combo.current(0)
 
     def _refresh_settings(self) -> None:
-        """Re-render the current selection."""
         if self._log:
             self._log("Refreshed frame preview.")
         self._render_current()
+
+    def _pick_highest(self) -> None:
+        """Auto-select the frame with the highest |force_col| at current
+        section + length + load."""
+        section = self.section_combo.get()
+        length_label = self.length_combo.get()
+        load_name = self.load_combo.get()
+        if not section or not length_label or not load_name or self._df is None:
+            return
+        length_mm = self._length_map.get(length_label, 0)
+        import sys as _sys
+        import os as _os
+        _repo = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
+        if _repo not in _sys.path:
+            _sys.path.insert(0, _repo)
+        from beam_viewer import find_highest_force_frame  # noqa: PLC0415
+        frame = find_highest_force_frame(
+            self._df, section, load_name,
+            force_col=self._force_col, length_mm=length_mm,
+        )
+        if frame is None:
+            if self._log:
+                self._log(f"No data for highest |{self._force_col}| in {section} / {load_name}")
+            return
+        frames = list(self.beam_combo.cget("values"))
+        str_frame = str(frame)
+        if str_frame in frames:
+            self.beam_combo.set(str_frame)
+        else:
+            # Try matching as int if needed
+            for f in frames:
+                if str(f) == str_frame:
+                    self.beam_combo.set(str(f))
+                    break
+        if self._log:
+            self._log(f"Picked beam {frame} (highest |{self._force_col}|)")
+        self._render_current()
+
+    def _batch_plot(self) -> None:
+        """Render a multi-panel figure with all frames at the selected
+        section + length, sorted by descending peak |force_col|."""
+        section = self.section_combo.get()
+        length_label = self.length_combo.get()
+        load_name = self.load_combo.get()
+        step_val = self.step_combo.get()
+        if not section or not length_label or not load_name or self._df is None:
+            return
+        length_mm = self._length_map.get(length_label, 0)
+        step_type = None if step_val == "Both" else step_val
+
+        try:
+            fig = self._batch_figure_builder(
+                self._df, load_name, section, length_mm,
+                force_col=self._force_col, step_type=step_type,
+            )
+        except ImportError as exc:
+            msg = f"Batch plot needs matplotlib: {exc}."
+            if self._log:
+                self._log(msg)
+            messagebox.showerror("Batch plot", msg)
+            return
+        except Exception as exc:  # noqa: BLE001
+            msg = f"Batch plot failed: {exc}"
+            if self._log:
+                self._log(msg)
+            messagebox.showerror("Batch plot", msg)
+            return
+        if fig is not None:
+            self._current_fig = fig
+            self.preview.set_figure(fig)
+            if self._log:
+                n = len(getattr(fig, "axes", [])) // 3
+                self._log(f"Batch plot: {n} frame(s) at {section} {length_label}")
+        else:
+            self._current_fig = None
+            self.preview.clear()
+            if self._log:
+                self._log("Batch plot produced no data.")
 
     def is_alive(self) -> bool:
         try:
@@ -407,8 +524,6 @@ class FramePreviewWindow(tk.Toplevel):
         step_val = self.step_combo.get()
         if not load_name or not section or not frame_val:
             return
-
-        # Map step combo value to None/str
         step_type = None if step_val == "Both" else step_val
 
         try:
@@ -442,7 +557,7 @@ class FramePreviewWindow(tk.Toplevel):
         load = self.load_combo.get() or "preview"
         sec = self.section_combo.get() or "X"
         step = self.step_combo.get() or "X"
-        beam = self.beam_combo.get() or "X"
+        beam = self.beam_combo.get() or "batch"
         default_name = f"frame_{sec}_{beam}_{load}_{step}_diagram.png"
         path = filedialog.asksaveasfilename(
             defaultextension=".png",

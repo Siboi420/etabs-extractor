@@ -393,6 +393,7 @@ class EtabsExtractorApp(tk.Tk):
         self._frame_preview_win = FramePreviewWindow(
             self,
             figure_builder=self._build_frame_preview_figure,
+            batch_figure_builder=self._build_batch_frame_preview_figure,
             log=self._set_log,
             closed=self._on_frame_preview_closed,
         )
@@ -421,6 +422,24 @@ class EtabsExtractorApp(tk.Tk):
         from beam_viewer import build_frame_figure  # noqa: PLC0415
         return build_frame_figure(df, frame, load_name, section,
                                   step_type=step_type)
+
+    def _build_batch_frame_preview_figure(self, df, load_name, section,
+                                          length_mm, *, force_col="M3",
+                                          step_type=None):
+        """Build a multi-panel batch figure for all beams at the given
+        section + length, sorted by descending peak |force_col|."""
+        import os as _os
+        import sys as _sys
+        _repo_root = _os.path.abspath(
+            _os.path.join(_os.path.dirname(__file__), "..", "..")
+        )
+        if _repo_root not in _sys.path:
+            _sys.path.insert(0, _repo_root)
+        from beam_viewer import build_batch_frame_figure  # noqa: PLC0415
+        return build_batch_frame_figure(
+            df, load_name, section, length_mm,
+            force_col=force_col, step_type=step_type,
+        )
 
     # -------------------------------------------------------- worker draining
     def _drain_pending(self, limit: int = 50000) -> None:

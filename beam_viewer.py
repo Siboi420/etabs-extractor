@@ -368,6 +368,125 @@ def build_frame_figure(
     return fig
 
 
+def find_highest_force_frame(
+    df: pd.DataFrame,
+    section: str,
+    load_name: str,
+    force_col: str = "M3",
+    length_mm: float | None = None,
+) -> int | str | None:
+    """Return the frame name with the highest absolute ``force_col``.
+
+    Optionally filters by ``length_mm`` (within 1mm tolerance).
+    Returns ``None`` if no matching data.
+    """
+    sub = df[df["section"] == section]
+    if length_mm is not None and "length_mm" in sub.columns:
+        tol = 1.0
+        sub = sub[sub["length_mm"].notna() & (sub["length_mm"].sub(length_mm).abs() <= tol)]
+    sub = sub[sub["load_name"] == load_name]
+    if sub.empty:
+        return None
+    idx = sub[force_col].abs().idxmax()
+    return sub.loc[idx, "frame"]
+
+
+def build_batch_frame_figure(
+    df: pd.DataFrame,
+    load_name: str,
+    section: str,
+    length_mm: float,
+    *,
+    force_col: str = "M3",
+    step_type: str | None = None,
+    cols: int = 3,
+    figsize: tuple[float, float] | None = None,
+) -> plt.Figure | None:
+    """Build a multi-panel figure with one 3-panel diagram per frame
+    in the given section + length group.  Frames are sorted by descending
+    peak |``force_col``| so the most critical beam comes first.
+
+    Returns the Figure (or ``None`` if no data).  The caller is
+    responsible for closing it when done.
+    """
+    frames = get_frames_for_length(df, section, length_mm)
+    if not frames:
+        return None
+
+    # Score each frame by max |force_col| under the chosen load
+    scored: list[tuple[int | str, float]] = []
+    for f in frames:
+        bd = get_beam_data(df, f, load_name)
+        if bd is None or bd.empty:
+            continue
+        peak = float(bd[force_col].abs().max())
+        scored.append((f, peak))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    n = len(scored)
+    rows = (n + cols - 1) // cols
+    if figsize is None:
+        figsize = (5.5 * cols, 3.8 * rows)
+
+    fig, axes = plt.subplots(rows * 3, cols, figsize=figsize, squeeze=False)
+    fig.subplots_adjust(hspace=0.5, wspace=0.25, left=0.05, right=0.97, top=0.95, bottom=0.04)
+    fig.suptitle(
+        f"Section: {section} | L={length_mm/1000:.2f}m | Load: {load_name}"
+        f"{' | Step: ' + step_type if step_type else ''}"
+        f" | Sorted by |{force_col}|",
+        fontsize=12, fontweight="bold",
+    )
+
+    # Hide all axes initially
+    for row in range(rows * 3):
+        for col in range(cols):
+            axes[row, col].set_visible(False)
+
+    for idx, (frame, peak) in enumerate(scored):
+        r = idx // cols
+        c = idx % cols
+        panel_axs = [axes[r * 3 + i, c] for i in range(3)]
+        for ax in panel_axs:
+            ax.set_visible(True)
+
+        bd = get_beam_data(df, frame, load_name)
+        if bd is None:
+            continue
+        sec_name = bd["section"].iloc[0]
+        plot_beam_diagrams(bd, frame, load_name, sec_name, panel_axs, step_type=step_type)
+
+        # Reduce font sizes for batch display
+        for ax in panel_axs:
+            ax.set_ylabel(ax.get_ylabel(), fontsize=7)
+            ax.set_xlabel(ax.get_xlabel(), fontsize=7)
+            ax.tick_params(labelsize=6)
+            ax.grid(True, alpha=0.2)
+            # Move legend inside
+            leg = ax.get_legend()
+            if leg:
+                for t in leg.get_texts():
+                    t.set_fontsize(5)
+                leg.get_frame().set_alpha(0.7)
+        # Remove axis labels except bottom row
+        if r < rows - 1:
+            panel_axs[2].set_xlabel("")
+        # Tighten annotations
+        for ax in panel_axs:
+            texts = [t for t in ax.texts if t.get_text().startswith(("Max:", "Min:"))]
+            for t in texts:
+                t.set_fontsize(5)
+
+    # Hide empty cells
+    for extra in range(n, rows * cols):
+        r = extra // cols
+        c = extra % cols
+        axes[r * 3, c].set_visible(False)
+
+    return fig
+
+
 class BeamViewer:
     """Interactive beam force diagram viewer."""
 
