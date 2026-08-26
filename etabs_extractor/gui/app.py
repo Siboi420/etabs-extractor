@@ -45,6 +45,7 @@ class EtabsExtractorApp(tk.Tk):
         self._poll_id = None
 
         self._build_layout()
+        self._apply_mode()  # apply initial mode (base) visibility
         self._drain_pending()
 
     # ------------------------------------------------------------------ layout
@@ -273,6 +274,9 @@ class EtabsExtractorApp(tk.Tk):
             self.load_field.set_items(combos, cases)
             # Populate the section selector for frame mode.
             section_vals = [""] + sections  # empty = all sections
+            self._set_log(
+                f"Check model: {len(sections)} section(s) found: {sections}"
+            )
             self.section_combo.configure(values=section_vals)
             if section_vals:
                 self.section_combo.current(0)
