@@ -299,6 +299,13 @@ def plot_beam_diagrams(
         ax.set_xlabel("Position along beam [m]", fontsize=10)
         ax.grid(True, alpha=0.3)
 
+        # Invert Y-axis tick labels for moment diagrams so they show
+        # the original signed moment, not the negated plot coordinate.
+        if col in ("M2", "M3"):
+            def _moment_fmt(x, _pos, _col=col):
+                return f"{_diagram_vals(np.array([x]), _col)[0]:.0f}"
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(_moment_fmt))
+
         # Annotate global max/min (undo diagram inversion so values show
         # the original signed moment, not the negated plot coordinate)
         if len(all_v) > 0:
