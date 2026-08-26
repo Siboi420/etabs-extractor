@@ -12,8 +12,9 @@ Three pieces:
 * :class:`FramePreviewWindow` — a pop-up with load/section/step/force-type/
   length/beam dropdowns for interactive beam force diagram previews after
   frame extraction.  Includes "Pick highest" (auto-select the beam with
-  the largest |force|) and "Batch plot all" (render all beams at the
-  selected length, sorted by descending peak |force|).
+  the largest |force|) and "Batch plot all" (overlay all beams at the
+  selected length on one diagram, with the highest-force beam
+  highlighted).
 """
 
 from __future__ import annotations
@@ -329,11 +330,10 @@ class FramePreviewWindow(tk.Toplevel):
         # -- Button row 2: Batch plot all -----------------------------------
         btn2 = ttk.Frame(self)
         btn2.pack(fill="x", padx=8, pady=(0, 4))
-        ttk.Button(btn2, text="Batch plot all (sorted by peak force)",
+        ttk.Button(btn2, text="Batch plot all (overlay)",
                    command=self._batch_plot).pack(side="left", padx=4)
         ttk.Label(
-            btn2, text="Diagrams for every beam at the selected length, "
-                       "sorted by descending |force|",
+            btn2, text="All beams overlaid in one diagram; ★ = highest |force|",
             foreground="#777", font=("", 8),
         ).pack(side="left", padx=4)
 

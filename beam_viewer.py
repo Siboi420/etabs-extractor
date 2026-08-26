@@ -399,12 +399,16 @@ def build_batch_frame_figure(
     *,
     force_col: str = "M3",
     step_type: str | None = None,
-    cols: int = 3,
-    figsize: tuple[float, float] | None = None,
+    highlight_best: bool = True,
+    figsize: tuple[float, float] = (14, 10),
 ) -> plt.Figure | None:
-    """Build a multi-panel figure with one 3-panel diagram per frame
-    in the given section + length group.  Frames are sorted by descending
-    peak |``force_col``| so the most critical beam comes first.
+    """Build a **single 3-panel figure** with all beams at the given
+    section + length overlaid on the same axes.
+
+    Each beam is drawn as a separate coloured line in every panel (P, V2,
+    M3).  A legend identifies each beam by its frame label.  The beam
+    with the highest peak |``force_col``| is drawn with a thicker,
+    brighter line (``highlight_best=True``, the default).
 
     Returns the Figure (or ``None`` if no data).  The caller is
     responsible for closing it when done.
@@ -413,7 +417,7 @@ def build_batch_frame_figure(
     if not frames:
         return None
 
-    # Score each frame by max |force_col| under the chosen load
+    # Score each frame by peak |force_col|
     scored: list[tuple[int | str, float]] = []
     for f in frames:
         bd = get_beam_data(df, f, load_name)
@@ -425,64 +429,90 @@ def build_batch_frame_figure(
         return None
     scored.sort(key=lambda x: x[1], reverse=True)
 
-    n = len(scored)
-    rows = (n + cols - 1) // cols
-    if figsize is None:
-        figsize = (5.5 * cols, 3.8 * rows)
+    # Separate best beam from the rest
+    best_frame = scored[0][0] if highlight_best else None
 
-    fig, axes = plt.subplots(rows * 3, cols, figsize=figsize, squeeze=False)
-    fig.subplots_adjust(hspace=0.5, wspace=0.25, left=0.05, right=0.97, top=0.95, bottom=0.04)
+    # Colour palette for the overlay lines
+    base_colors = [
+        "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+        "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+        "#aec7e8", "#ffbb78", "#98df8a", "#ff9896", "#c5b0d5",
+        "#c49c94", "#f7b6d2", "#c7c7c7", "#dbdb8d", "#9edae5",
+    ]
+
+    fig, axs = plt.subplots(3, 1, figsize=figsize, sharex=True)
+    fig.subplots_adjust(hspace=0.35, left=0.06, right=0.97, top=0.94, bottom=0.06)
     fig.suptitle(
         f"Section: {section} | L={length_mm/1000:.2f}m | Load: {load_name}"
         f"{' | Step: ' + step_type if step_type else ''}"
-        f" | Sorted by |{force_col}|",
-        fontsize=12, fontweight="bold",
+        f" | {len(scored)} beam(s)   ★ = highest |{force_col}|",
+        fontsize=11, fontweight="bold",
     )
 
-    # Hide all axes initially
-    for row in range(rows * 3):
-        for col in range(cols):
-            axes[row, col].set_visible(False)
+    force_cols = ("P", "V2", "M3")
+    _col_labels = {"P": "Axial (P)", "V2": "Shear (V2)", "M3": "Moment (M3)"}
+
+    for ax_idx, (ax, col) in enumerate(zip(axs, force_cols)):
+        ax.set_title(_col_labels[col], fontsize=10, fontweight="bold")
+        ax.set_ylabel(_unit_label(col), fontsize=9)
+        if ax_idx == 2:
+            ax.set_xlabel("Position along beam [m]", fontsize=9)
+        ax.grid(True, alpha=0.2)
+        ax.axhline(0, color="gray", linewidth=0.5, linestyle="--")
 
     for idx, (frame, peak) in enumerate(scored):
-        r = idx // cols
-        c = idx % cols
-        panel_axs = [axes[r * 3 + i, c] for i in range(3)]
-        for ax in panel_axs:
-            ax.set_visible(True)
-
         bd = get_beam_data(df, frame, load_name)
-        if bd is None:
+        if bd is None or bd.empty:
             continue
-        sec_name = bd["section"].iloc[0]
-        plot_beam_diagrams(bd, frame, load_name, sec_name, panel_axs, step_type=step_type)
 
-        # Reduce font sizes for batch display
-        for ax in panel_axs:
-            ax.set_ylabel(ax.get_ylabel(), fontsize=7)
-            ax.set_xlabel(ax.get_xlabel(), fontsize=7)
-            ax.tick_params(labelsize=6)
-            ax.grid(True, alpha=0.2)
-            # Move legend inside
-            leg = ax.get_legend()
-            if leg:
-                for t in leg.get_texts():
-                    t.set_fontsize(5)
-                leg.get_frame().set_alpha(0.7)
-        # Remove axis labels except bottom row
-        if r < rows - 1:
-            panel_axs[2].set_xlabel("")
-        # Tighten annotations
-        for ax in panel_axs:
-            texts = [t for t in ax.texts if t.get_text().startswith(("Max:", "Min:"))]
-            for t in texts:
-                t.set_fontsize(5)
+        is_best = highlight_best and frame == best_frame
+        color = base_colors[idx % len(base_colors)]
+        lw = 2.5 if is_best else 1.2
+        alpha = 1.0 if is_best else 0.7
+        zorder = 10 if is_best else 1
+        label = f"★{frame}" if is_best else str(frame)
 
-    # Hide empty cells
-    for extra in range(n, rows * cols):
-        r = extra // cols
-        c = extra % cols
-        axes[r * 3, c].set_visible(False)
+        # For envelope combos, pick the relevant step group
+        groups = get_force_groups(bd)
+        if step_type and step_type in groups:
+            grp = groups[step_type]
+        else:
+            grp = next(iter(groups.values()))
+
+        stations_m = grp["station"].values / 1000.0
+
+        for ax, fcol in zip(axs, force_cols):
+            raw = np.array([_scale_force(v, fcol) for v in grp[fcol].values])
+            vals = _diagram_vals(raw, fcol)
+            ax.plot(stations_m, vals, color=color, linewidth=lw,
+                    alpha=alpha, zorder=zorder, label=label)
+
+    # Legend — place it outside to the right for clarity
+    for ax in axs:
+        # Collect all handles-labels, deduplicate by label
+        handles, labels = ax.get_legend_handles_labels()
+        # Deduplicate keeping first occurrence (best beam first)
+        seen: set[str] = set()
+        uniq: list = []
+        for h, l in zip(handles, labels):
+            if l not in seen:
+                seen.add(l)
+                uniq.append((h, l))
+        if uniq:
+            leg = ax.legend(
+                [h for h, _ in uniq], [l for _, l in uniq],
+                loc="upper left", fontsize=6,
+                ncol=1 if len(uniq) > 12 else 2,
+                framealpha=0.8,
+            )
+            # Adjust legend position for the middle panel
+            if ax_idx == 1:
+                ax.legend(
+                    [h for h, _ in uniq], [l for _, l in uniq],
+                    loc="upper left", fontsize=6,
+                    ncol=1 if len(uniq) > 12 else 2,
+                    framealpha=0.8,
+                )
 
     return fig
 
