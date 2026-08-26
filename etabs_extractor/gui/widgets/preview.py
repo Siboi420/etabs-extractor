@@ -10,11 +10,10 @@ Three pieces:
   a :class:`PlotPreviewFrame` canvas for base-reaction plan views.
 
 * :class:`FramePreviewWindow` — a pop-up with load/section/step/force-type/
-  length/beam dropdowns for interactive beam force diagram previews after
-  frame extraction.  Includes "Pick highest" (auto-select the beam with
-  the largest |force|) and "Batch plot all" (overlay all beams at the
-  selected length on one diagram, with the highest-force beam
-  highlighted).
+  length dropdowns for beam force diagram previews after frame extraction.
+  Preview always shows the beam with the highest |force| at the selected
+  section + length + load.  "Batch plot all" overlays every beam of that
+  length on one diagram (★ = highest-force beam).
 """
 
 from __future__ import annotations
@@ -283,13 +282,14 @@ class FramePreviewWindow(tk.Toplevel):
         self._length_map: dict[str, float] = {}
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # -- Selector row: Load, Section, Step, Force, Length, Beam ---------
+        # -- Selector row: Load, Section, Step, Force, Length ---------------
         top = ttk.Frame(self)
         top.pack(fill="x", padx=8, pady=6)
 
         ttk.Label(top, text="Load:").pack(side="left")
         self.load_combo = ttk.Combobox(top, state="readonly", width=18)
         self.load_combo.pack(side="left", padx=4)
+        self.load_combo.bind("<<ComboboxSelected>>", self._on_selection_change)
 
         ttk.Label(top, text="Section:").pack(side="left", padx=(8, 0))
         self.section_combo = ttk.Combobox(top, state="readonly", width=8)
@@ -301,6 +301,7 @@ class FramePreviewWindow(tk.Toplevel):
                                        values=("Both", "Max", "Min"))
         self.step_combo.pack(side="left", padx=4)
         self.step_combo.current(0)
+        self.step_combo.bind("<<ComboboxSelected>>", self._on_selection_change)
 
         ttk.Label(top, text="Force:").pack(side="left", padx=(8, 0))
         self.force_combo = ttk.Combobox(
@@ -309,22 +310,18 @@ class FramePreviewWindow(tk.Toplevel):
         )
         self.force_combo.pack(side="left", padx=4)
         self.force_combo.current(0)
+        self.force_combo.bind("<<ComboboxSelected>>", self._on_selection_change)
 
         ttk.Label(top, text="Length:").pack(side="left", padx=(8, 0))
         self.length_combo = ttk.Combobox(top, state="readonly", width=9)
         self.length_combo.pack(side="left", padx=4)
-        self.length_combo.bind("<<ComboboxSelected>>", self._on_length_change)
+        self.length_combo.bind("<<ComboboxSelected>>", self._on_selection_change)
 
-        ttk.Label(top, text="Beam:").pack(side="left", padx=(8, 0))
-        self.beam_combo = ttk.Combobox(top, state="readonly", width=8)
-        self.beam_combo.pack(side="left", padx=4)
-
-        # -- Button row 1: Preview / Refresh / Pick highest / Save ----------
+        # -- Button row 1: Preview / Refresh / Save -------------------------
         btn1 = ttk.Frame(self)
         btn1.pack(fill="x", padx=8, pady=(0, 2))
         ttk.Button(btn1, text="Preview", command=self._render_current).pack(side="left", padx=4)
         ttk.Button(btn1, text="Refresh", command=self._refresh_settings).pack(side="left", padx=4)
-        ttk.Button(btn1, text="Pick highest", command=self._pick_highest).pack(side="left", padx=4)
         ttk.Button(btn1, text="Save preview image", command=self._save_preview).pack(side="left", padx=4)
 
         # -- Button row 2: Batch plot all -----------------------------------
@@ -364,18 +361,33 @@ class FramePreviewWindow(tk.Toplevel):
         self._populate_lengths()
         if self.length_combo.cget("values"):
             self.length_combo.current(0)
-        self._populate_frames()
-        if self.beam_combo.cget("values"):
-            self.beam_combo.current(0)
 
         self._render_current()
 
-    # ----------------------------------------------------------------- force
+    # ---------------------------------------------------------------- helpers
     @property
     def _force_col(self) -> str:
-        """Map the force-combo label to a DataFrame column name."""
         label = self.force_combo.get()
         return {"Moment (M3)": "M3", "Shear (V2)": "V2", "Axial (P)": "P"}.get(label, "M3")
+
+    def _get_highest_frame(self) -> str | None:
+        """Return the frame with the highest |force_col| at the current
+        selection, or None if no data."""
+        section = self.section_combo.get()
+        length_label = self.length_combo.get()
+        load_name = self.load_combo.get()
+        if not section or not length_label or not load_name or self._df is None:
+            return None
+        length_mm = self._length_map.get(length_label, 0)
+        import sys as _sys, os as _os
+        _repo = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
+        if _repo not in _sys.path:
+            _sys.path.insert(0, _repo)
+        from beam_viewer import find_highest_force_frame  # noqa: PLC0415
+        return find_highest_force_frame(
+            self._df, section, load_name,
+            force_col=self._force_col, length_mm=length_mm,
+        )
 
     def _populate_lengths(self) -> None:
         """Fill the length dropdown from the selected section."""
@@ -383,8 +395,7 @@ class FramePreviewWindow(tk.Toplevel):
         if not section or self._df is None:
             self.length_combo.configure(values=[])
             return
-        import sys as _sys
-        import os as _os
+        import sys as _sys, os as _os
         _repo = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
         if _repo not in _sys.path:
             _sys.path.insert(0, _repo)
@@ -394,82 +405,99 @@ class FramePreviewWindow(tk.Toplevel):
         self._length_map = dict(zip(labels, lengths))
         self.length_combo.configure(values=labels)
 
-    def _populate_frames(self) -> None:
-        """Fill the beam dropdown from the selected section + length."""
-        section = self.section_combo.get()
-        length_label = self.length_combo.get()
-        if not section or not length_label or self._df is None:
-            self.beam_combo.configure(values=[])
-            return
-        length_mm = self._length_map.get(length_label, 0)
-        import sys as _sys
-        import os as _os
-        _repo = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
-        if _repo not in _sys.path:
-            _sys.path.insert(0, _repo)
-        from beam_viewer import get_frames_for_length  # noqa: PLC0415
-        frames = get_frames_for_length(self._df, section, length_mm)
-        self.beam_combo.configure(values=frames)
-
     # ------------------------------------------------------------ callbacks
     def _on_section_change(self, _event=None) -> None:
         self._populate_lengths()
         if self.length_combo.cget("values"):
             self.length_combo.current(0)
-        self._populate_frames()
-        if self.beam_combo.cget("values"):
-            self.beam_combo.current(0)
+        self._render_current()
 
-    def _on_length_change(self, _event=None) -> None:
-        self._populate_frames()
-        if self.beam_combo.cget("values"):
-            self.beam_combo.current(0)
+    def _on_selection_change(self, _event=None) -> None:
+        """Auto-render on any dropdown change (load, step, force, length)."""
+        self._render_current()
 
     def _refresh_settings(self) -> None:
         if self._log:
             self._log("Refreshed frame preview.")
         self._render_current()
 
-    def _pick_highest(self) -> None:
-        """Auto-select the frame with the highest |force_col| at current
-        section + length + load."""
-        section = self.section_combo.get()
-        length_label = self.length_combo.get()
+    def is_alive(self) -> bool:
+        try:
+            return bool(self.winfo_exists())
+        except tk.TclError:
+            return False
+
+    # --------------------------------------------------------------- render
+    def _render_current(self) -> None:
+        if self._df is None or self._df.empty:
+            return
         load_name = self.load_combo.get()
-        if not section or not length_label or not load_name or self._df is None:
+        section = self.section_combo.get()
+        step_val = self.step_combo.get()
+        if not load_name or not section:
             return
-        length_mm = self._length_map.get(length_label, 0)
-        import sys as _sys
-        import os as _os
-        _repo = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
-        if _repo not in _sys.path:
-            _sys.path.insert(0, _repo)
-        from beam_viewer import find_highest_force_frame  # noqa: PLC0415
-        frame = find_highest_force_frame(
-            self._df, section, load_name,
-            force_col=self._force_col, length_mm=length_mm,
-        )
-        if frame is None:
+        step_type = None if step_val == "Both" else step_val
+
+        # Auto-find the highest-force beam
+        frame_val = self._get_highest_frame()
+        if frame_val is None:
             if self._log:
-                self._log(f"No data for highest |{self._force_col}| in {section} / {load_name}")
+                self._log(f"No data for {section} / {load_name}")
             return
-        frames = list(self.beam_combo.cget("values"))
-        str_frame = str(frame)
-        if str_frame in frames:
-            self.beam_combo.set(str_frame)
+
+        try:
+            fig = self._figure_builder(self._df, frame_val, load_name, section,
+                                       step_type=step_type)
+        except ImportError as exc:
+            msg = f"Preview needs matplotlib: {exc}."
+            if self._log:
+                self._log(msg)
+            messagebox.showerror("Frame preview", msg)
+            return
+        except Exception as exc:  # noqa: BLE001
+            msg = f"Preview failed: {exc}"
+            if self._log:
+                self._log(msg)
+            messagebox.showerror("Frame preview", msg)
+            return
+        if fig is not None:
+            self._current_fig = fig
+            self.preview.set_figure(fig)
+            if self._log:
+                self._log(f"Beam {frame_val} (highest |{self._force_col}|) — {section} {load_name}")
         else:
-            # Try matching as int if needed
-            for f in frames:
-                if str(f) == str_frame:
-                    self.beam_combo.set(str(f))
-                    break
-        if self._log:
-            self._log(f"Picked beam {frame} (highest |{self._force_col}|)")
-        self._render_current()
+            self._current_fig = None
+            self.preview.clear()
+
+    # ---------------------------------------------------------------- save
+    def _save_preview(self) -> None:
+        current = self._current_fig
+        if current is None:
+            messagebox.showinfo("Save preview", "No preview figure to save.")
+            return
+        load = self.load_combo.get() or "preview"
+        sec = self.section_combo.get() or "X"
+        step = self.step_combo.get() or "X"
+        default_name = f"frame_{sec}_{load}_{step}_diagram.png"
+        path = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNG", "*.png"), ("PDF", "*.pdf"), ("SVG", "*.svg")],
+            initialfile=default_name,
+        )
+        if not path:
+            return
+        import os  # noqa: PLC0415
+        _ext = os.path.splitext(path)[1].lower()
+        _fmt = _ext.lstrip(".") if _ext else "png"
+        try:
+            current.savefig(path, dpi=150, bbox_inches="tight", format=_fmt)
+            if self._log:
+                self._log(f"Saved frame preview: {path}")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Save preview", f"Could not save: {exc}")
 
     def _batch_plot(self) -> None:
-        """Render a multi-panel figure with all frames at the selected
-        section + length, sorted by descending peak |force_col|."""
+        """Render overlay of all beams at the selected section + length."""
         section = self.section_combo.get()
         length_label = self.length_combo.get()
         load_name = self.load_combo.get()
@@ -500,81 +528,12 @@ class FramePreviewWindow(tk.Toplevel):
             self._current_fig = fig
             self.preview.set_figure(fig)
             if self._log:
-                n = len(getattr(fig, "axes", [])) // 3
-                self._log(f"Batch plot: {n} frame(s) at {section} {length_label}")
+                self._log(f"Batch plot: {len(fig.axes)//3} beam(s) at {section} {length_label}")
         else:
             self._current_fig = None
             self.preview.clear()
             if self._log:
                 self._log("Batch plot produced no data.")
-
-    def is_alive(self) -> bool:
-        try:
-            return bool(self.winfo_exists())
-        except tk.TclError:
-            return False
-
-    # --------------------------------------------------------------- render
-    def _render_current(self) -> None:
-        if self._df is None or self._df.empty:
-            return
-        load_name = self.load_combo.get()
-        section = self.section_combo.get()
-        frame_val = self.beam_combo.get()
-        step_val = self.step_combo.get()
-        if not load_name or not section or not frame_val:
-            return
-        step_type = None if step_val == "Both" else step_val
-
-        try:
-            fig = self._figure_builder(self._df, frame_val, load_name, section,
-                                       step_type=step_type)
-        except ImportError as exc:
-            msg = f"Preview needs matplotlib: {exc}."
-            if self._log:
-                self._log(msg)
-            messagebox.showerror("Frame preview", msg)
-            return
-        except Exception as exc:  # noqa: BLE001
-            msg = f"Preview failed: {exc}"
-            if self._log:
-                self._log(msg)
-            messagebox.showerror("Frame preview", msg)
-            return
-        if fig is not None:
-            self._current_fig = fig
-            self.preview.set_figure(fig)
-        else:
-            self._current_fig = None
-            self.preview.clear()
-
-    # ---------------------------------------------------------------- save
-    def _save_preview(self) -> None:
-        current = self._current_fig
-        if current is None:
-            messagebox.showinfo("Save preview", "No preview figure to save.")
-            return
-        load = self.load_combo.get() or "preview"
-        sec = self.section_combo.get() or "X"
-        step = self.step_combo.get() or "X"
-        beam = self.beam_combo.get() or "batch"
-        default_name = f"frame_{sec}_{beam}_{load}_{step}_diagram.png"
-        path = filedialog.asksaveasfilename(
-            defaultextension=".png",
-            filetypes=[("PNG", "*.png"), ("PDF", "*.pdf"), ("SVG", "*.svg")],
-            initialfile=default_name,
-        )
-        if not path:
-            return
-        import os  # noqa: PLC0415
-        _ext = os.path.splitext(path)[1].lower()
-        _fmt = _ext.lstrip(".") if _ext else "png"
-        try:
-            current.savefig(path, dpi=150, bbox_inches="tight", format=_fmt)
-            if self._log:
-                self._log(f"Saved frame preview: {path}")
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Save preview", f"Could not save: {exc}")
 
     # ---------------------------------------------------------------- close
     def _on_close(self) -> None:
