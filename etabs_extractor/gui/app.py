@@ -123,17 +123,24 @@ class EtabsExtractorApp(tk.Tk):
         ttk.Checkbutton(
             opt, text="Attach (not launch)", variable=self.attach_var
         ).pack(side="left", padx=8)
-        # Frame-only control: section selector (hidden in base mode).
-        sec_frame = ttk.Frame(load)
-        ttk.Label(sec_frame, text="Section filter:").pack(side="left")
-        self.section_var = tk.StringVar()
-        self.section_combo = ttk.Combobox(
-            sec_frame, textvariable=self.section_var, state="readonly", width=16,
+        # Frame-only control: section multi-select (hidden in base mode).
+        sec_frame = ttk.LabelFrame(load, text="Section filter")
+        _reg(self._frame_only, "section_frame", sec_frame, fill="x", padx=6, pady=2)
+        inner = ttk.Frame(sec_frame)
+        inner.pack(fill="x", padx=4, pady=2)
+        self.section_listbox = tk.Listbox(
+            inner, selectmode="multiple", height=4, exportselection=False,
         )
-        self.section_combo.pack(side="left", padx=4)
-        ttk.Label(sec_frame, text="(empty = all sections)",
-                  foreground="#777", font=("", 8)).pack(side="left", padx=4)
-        _reg(self._frame_only, "section_combo", sec_frame, fill="x", padx=6, pady=2)
+        self.section_listbox.pack(side="left", fill="x", expand=True)
+        scroll = ttk.Scrollbar(inner, orient="vertical", command=self.section_listbox.yview)
+        scroll.pack(side="left", fill="y")
+        self.section_listbox.configure(yscrollcommand=scroll.set)
+        btn_row = ttk.Frame(sec_frame)
+        btn_row.pack(fill="x", padx=4, pady=2)
+        ttk.Button(btn_row, text="Select all", command=self._select_all_sections).pack(side="left", padx=2)
+        ttk.Button(btn_row, text="Clear all", command=self._clear_all_sections).pack(side="left", padx=2)
+        ttk.Label(btn_row, text="(empty = all sections)",
+                  foreground="#777", font=("", 8)).pack(side="left", padx=6)
 
         # -- Frame-force preview button (frame-mode only) --------------------
         fprow = ttk.Frame(self)
@@ -192,6 +199,13 @@ class EtabsExtractorApp(tk.Tk):
         self.extract_btn.pack(side="left")
         ttk.Button(actions, text="Quit", command=self.destroy).pack(side="right")
 
+    # --------------------------------------------------------------- helpers
+    def _select_all_sections(self) -> None:
+        self.section_listbox.selection_set(0, "end")
+
+    def _clear_all_sections(self) -> None:
+        self.section_listbox.selection_clear(0, "end")
+
     # --------------------------------------------------------------- settings
     def _apply_mode(self) -> None:
         """Show/hide mode-scoped widgets as the extract-mode radio changes.
@@ -224,8 +238,8 @@ class EtabsExtractorApp(tk.Tk):
         s.run_analysis = self.run_analysis_var.get()
         s.attach = self.attach_var.get()
         if s.extract_mode == "frame":
-            sec = self.section_var.get()
-            s.selected_sections = [sec] if sec else []
+            sel = self.section_listbox.curselection()
+            s.selected_sections = [self.section_listbox.get(i) for i in sel]
             s.selected_frames = []
             return s
         s.elevation = self.elevation_field.get()
@@ -272,14 +286,13 @@ class EtabsExtractorApp(tk.Tk):
                 self._set_log("No active model filename returned.")
             # Populate the load dropdown with the model's combos/cases.
             self.load_field.set_items(combos, cases)
-            # Populate the section selector for frame mode.
-            section_vals = [""] + sections  # empty = all sections
+            # Populate the section listbox for frame mode.
+            self.section_listbox.delete(0, "end")
+            for s in sections:
+                self.section_listbox.insert("end", s)
             self._set_log(
                 f"Check model: {len(sections)} section(s) found: {sections}"
             )
-            self.section_combo.configure(values=section_vals)
-            if section_vals:
-                self.section_combo.current(0)
             n_combos = len(combos)
             n_cases = len(cases)
             self._set_log(
@@ -519,6 +532,13 @@ class EtabsExtractorApp(tk.Tk):
         except Exception:  # noqa: BLE001 - empty queue; keep polling
             if runner is self._runner:
                 self._poll_id = self.after(80, lambda: self._poll(runner, callback))
+
+    # ------------------------------------------------------- section helpers
+    def _select_all_sections(self) -> None:
+        self.section_listbox.selection_set(0, "end")
+
+    def _clear_all_sections(self) -> None:
+        self.section_listbox.selection_clear(0, "end")
 
     # -------------------------------------------------------------- status
     def _set_log(self, text: str) -> None:
