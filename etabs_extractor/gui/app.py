@@ -122,12 +122,17 @@ class EtabsExtractorApp(tk.Tk):
         ttk.Checkbutton(
             opt, text="Attach (not launch)", variable=self.attach_var
         ).pack(side="left", padx=8)
-        # Frame-only control: section + frame-object selector (hidden in base).
-        self.frame_field = LoadSelectionField(
-            load, label="Frames", title="Select frames",
-            empty_summary="all frames", kind_a="section", kind_b="frame",
+        # Frame-only control: section selector (hidden in base mode).
+        sec_frame = ttk.Frame(load)
+        ttk.Label(sec_frame, text="Section filter:").pack(side="left")
+        self.section_var = tk.StringVar()
+        self.section_combo = ttk.Combobox(
+            sec_frame, textvariable=self.section_var, state="readonly", width=16,
         )
-        _reg(self._frame_only, "frames", self.frame_field, fill="x", padx=6, pady=3)
+        self.section_combo.pack(side="left", padx=4)
+        ttk.Label(sec_frame, text="(empty = all sections)",
+                  foreground="#777", font=("", 8)).pack(side="left", padx=4)
+        _reg(self._frame_only, "section_combo", sec_frame, fill="x", padx=6, pady=2)
 
         # -- Frame-force preview button (frame-mode only) --------------------
         fprow = ttk.Frame(self)
@@ -218,7 +223,9 @@ class EtabsExtractorApp(tk.Tk):
         s.run_analysis = self.run_analysis_var.get()
         s.attach = self.attach_var.get()
         if s.extract_mode == "frame":
-            s.selected_sections, s.selected_frames = self.frame_field.get_selected()
+            sec = self.section_var.get()
+            s.selected_sections = [sec] if sec else []
+            s.selected_frames = []
             return s
         s.elevation = self.elevation_field.get()
         s.only_loaded = self.only_loaded_var.get()
@@ -264,8 +271,11 @@ class EtabsExtractorApp(tk.Tk):
                 self._set_log("No active model filename returned.")
             # Populate the load dropdown with the model's combos/cases.
             self.load_field.set_items(combos, cases)
-            # Populate the frame-mode selector with sections + frames.
-            self.frame_field.set_items(sections, frames)
+            # Populate the section selector for frame mode.
+            section_vals = [""] + sections  # empty = all sections
+            self.section_combo.configure(values=section_vals)
+            if section_vals:
+                self.section_combo.current(0)
             n_combos = len(combos)
             n_cases = len(cases)
             self._set_log(
