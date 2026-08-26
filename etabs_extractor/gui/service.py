@@ -236,6 +236,7 @@ def inspect_active_model(attach: bool = True, session=None) -> dict:
                 logging.getLogger(__name__).debug(
                     "Could not list %s: %s", key, exc
                 )
+                print(f"[etabs_extractor] Could not list {key}: {exc}")
                 info[key] = []
         return info
     except Exception as exc:  # noqa: BLE001 - root-cause tooltip

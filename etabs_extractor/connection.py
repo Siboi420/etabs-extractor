@@ -301,18 +301,34 @@ class EtabsSession:
             return None
 
     def get_frame_section_names(self) -> list[str]:
-        """Return the list of distinct frame property names.
+        """Return the sorted distinct frame section names.
 
-        Uses ``PropFrame.GetNameList`` (same ``_gp`` pattern as
-        ``FrameObj.GetNameList``). COM stays quarantined here.
+        Tries ``PropFrame.GetNameList`` first.  Falls back to reading
+        each frame's assigned section via ``FrameObj.GetSection`` and
+        deduplicating.  Returns an empty list only when both fail.
         """
+        # Primary: PropFrame.GetNameList (fast, one COM call).
         try:
             count, names = _gp(self.sap_model.PropFrame.GetNameList)
+            if names:
+                return sorted(names)
+        except Exception:  # noqa: BLE001 - fall through
+            pass
+
+        # Fallback: read sections from every frame object (slower but
+        # reliable).
+        try:
+            frame_names = self.get_frame_names()
+            seen: set[str] = set()
+            for f in frame_names:
+                sec = self.get_section_for_frame(f)
+                if sec:
+                    seen.add(sec)
+            return sorted(seen)
         except Exception as exc:  # noqa: BLE001
             raise EtabsConnectionError(
-                f"PropFrame.GetNameList failed: {exc}"
+                f"Could not list frame sections: {exc}"
             ) from exc
-        return list(names or [])
 
     def setup_select_loads(self, combos: list[str] | None, cases: list[str] | None) -> None:
         """Select the given ``combos`` and ``cases`` for output.
