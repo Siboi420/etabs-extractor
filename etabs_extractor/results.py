@@ -36,19 +36,62 @@ from .models import (
     to_base_dataframe,
     to_dataframe,
 )
+from .units import LEGACY_FRAME, LENGTH_TO_M, UnitSystem, factors, resolve_target
 
 if TYPE_CHECKING:
     from .connection import EtabsSession
 
 logger = logging.getLogger(__name__)
 
-# Base-reaction export unit conversion.  ETABS reports reaction forces in N and
-# reaction moments in N·mm (model units); the base-reaction export converts
-# them to kN (÷1000) and kN·m (÷1e6) at record construction so the DataFrame
-# and every CSV carry the converted values.  Coordinates (x/y/z) are NOT
-# converted and stay in the model's length units (mm).
-BASE_FORCE_SCALE = 1000.0   # N   -> kN
-BASE_MOMENT_SCALE = 1e6     # N·mm -> kN·m
+
+@dataclass(frozen=True)
+class _UnitCtx:
+    """Resolved unit-conversion context for one extraction run.
+
+    ``force_factor`` / ``moment_factor`` / ``length_factor`` convert a value
+    read from COM (in the model's own present units, ``src``) to the
+    requested output units (``dst``): ``value_dst = value_src * factor``.
+    Passed to every per-item reader so records carry both the converted
+    values and the ``dst`` unit labels.
+    """
+
+    force_factor: float
+    moment_factor: float
+    length_factor: float
+    src: UnitSystem
+    dst: UnitSystem
+
+
+def _source_units(session: "EtabsSession") -> UnitSystem:
+    """Best-effort read of the active model's present units.
+
+    Falls back to :data:`etabs_extractor.units.LEGACY_FRAME` (N, mm — the
+    unit system this package used to hardcode) when the session has no
+    ``get_present_units`` (e.g. an older test fake) or the COM call fails,
+    so extraction still works, just without model-aware conversion.
+    """
+    try:
+        return session.get_present_units()
+    except Exception as exc:  # noqa: BLE001 - degrade to the legacy assumption
+        logger.debug(
+            "Could not read model present units, assuming legacy N/mm: %s", exc
+        )
+        return LEGACY_FRAME
+
+
+def _resolve_unit_ctx(
+    session: "EtabsSession", force_unit: str, length_unit: str
+) -> _UnitCtx:
+    """Resolve the source/target unit systems and conversion factors."""
+    src = _source_units(session)
+    dst = resolve_target(src, force_unit, length_unit)
+    ff, mf, lf = factors(src, dst)
+    return _UnitCtx(force_factor=ff, moment_factor=mf, length_factor=lf, src=src, dst=dst)
+
+
+def _scale_opt(value: float | None, factor: float) -> float | None:
+    """Scale an optional numeric value, passing ``None`` through unchanged."""
+    return value * factor if value is not None else None
 
 
 class ExtractionError(RuntimeError):
@@ -152,7 +195,7 @@ class ExtractKind:
 
     label: str            # used in the "no <label> objects" error message
     get_names: Callable   # (session) -> list[str]
-    read: Callable        # (session, name, combos, cases) -> list[record]
+    read: Callable        # (session, name, combos, cases, uctx: _UnitCtx) -> list[record]
     to_df: Callable       # (records) -> DataFrame
     write: Callable       # (records, grouped, output_dir, tag) -> None
 
@@ -233,6 +276,8 @@ def _extract(
     post_filter: Callable | None = None,
     session: "EtabsSession | None" = None,
     tag: str | None = None,
+    force_unit: str = "model",
+    length_unit: str = "model",
 ) -> tuple:
     """Shared extraction driver for every :class:`ExtractKind`.
 
@@ -240,7 +285,10 @@ def _extract(
     filtering, per-item reads, optional post-filtering, DataFrame assembly
     and CSV writing.  ``name_filter`` restricts the object names to read
     (``--frames`` / ``--points``); ``post_filter`` optionally drops whole
-    records before assembly (e.g. ``only_loaded``).  Returns
+    records before assembly (e.g. ``only_loaded``).  ``force_unit`` /
+    ``length_unit`` select the output unit system (default ``"model"`` —
+    the active model's own present units, read live via
+    :meth:`EtabsSession.get_present_units`; no conversion applied). Returns
     ``(consolidated_DataFrame, {load_name: DataFrame}, list[record])`` — the
     shape every public extractor returns.
     """
@@ -249,6 +297,8 @@ def _extract(
     )
 
     try:
+        uctx = _resolve_unit_ctx(session, force_unit, length_unit)
+
         combos_use, cases_use = _select_loads(
             session, combos=combos, cases=cases, all_requested=all_requested
         )
@@ -266,7 +316,7 @@ def _extract(
 
         all_records: list = []
         for name in names:
-            all_records.extend(kind.read(session, name, combos_use, cases_use))
+            all_records.extend(kind.read(session, name, combos_use, cases_use, uctx))
 
         if post_filter is not None:
             all_records = post_filter(all_records)
@@ -288,13 +338,15 @@ def _read_frame_forces(
     frame: str,
     combos: list[str] | None,
     cases: list[str] | None,
+    uctx: _UnitCtx,
 ) -> list[FrameForceRecord]:
     """Read forces for a single frame across the selected combos/cases.
 
     Selection is applied per whole-model via setup calls in the caller; here
     we rely on the COM ``FrameForce`` item-type=0 (Object) returning all
     selected load names for this frame at once.  The section name is a
-    best-effort per-frame lookup (one COM call per frame, as before).
+    best-effort per-frame lookup (one COM call per frame, as before).  Force
+    /moment/length values are scaled from the model's units to ``uctx.dst``.
     """
     raw = session.frame_force(frame, item_type_elm=0)
     if raw is None:
@@ -306,7 +358,8 @@ def _read_frame_forces(
     ) = raw
 
     section = session.get_section_for_frame(frame) or ""
-    length_mm = session.get_frame_length_mm(frame)
+    length_mm = _scale_opt(session.get_frame_length_mm(frame), uctx.length_factor)
+    ff, mf, lf = uctx.force_factor, uctx.moment_factor, uctx.length_factor
 
     records: list[FrameForceRecord] = []
     # NumberResults is a COM by-ref scalar; coerce via len for list-like
@@ -327,20 +380,22 @@ def _read_frame_forces(
             FrameForceRecord(
                 frame=frame,
                 section=section,
-                station=_f(ObjSta, i, default=0.0),
+                station=_f(ObjSta, i, default=0.0) * lf,
                 length_mm=length_mm,
                 load_name=name,
                 load_kind=kind,
-                axial=_f(P, i),
-                shear_2=_f(V2, i),
-                shear_3=_f(V3, i),
-                torsion=_f(T, i),
-                moment_2=_f(M2, i),
-                moment_3=_f(M3, i),
-                obj_sta=_f_optional(ObjSta, i),
+                axial=_f(P, i) * ff,
+                shear_2=_f(V2, i) * ff,
+                shear_3=_f(V3, i) * ff,
+                torsion=_f(T, i) * mf,
+                moment_2=_f(M2, i) * mf,
+                moment_3=_f(M3, i) * mf,
+                obj_sta=_scale_opt(_f_optional(ObjSta, i), lf),
                 elm=str(Elm[i]) if Elm is not None and i < len(Elm) else None,
-                elm_sta=_f_optional(ElmSta, i),
+                elm_sta=_scale_opt(_f_optional(ElmSta, i), lf),
                 step_type=_s(StepType, i),
+                force_unit=uctx.dst.force,
+                length_unit=uctx.dst.length,
             )
         )
     return records
@@ -514,7 +569,7 @@ def _make_frame_reader(sections: "set[str] | None"):
     sections means no filter (all sections).
     """
 
-    def _read(session, frame, combos, cases) -> list[FrameForceRecord]:
+    def _read(session, frame, combos, cases, uctx) -> list[FrameForceRecord]:
         if sections is not None and len(sections) > 0:
             try:
                 sec = session.get_section_for_frame(frame) or ""
@@ -523,7 +578,7 @@ def _make_frame_reader(sections: "set[str] | None"):
                 return []
             if sec not in sections:
                 return []
-        return _read_frame_forces(session, frame, combos, cases)
+        return _read_frame_forces(session, frame, combos, cases, uctx)
 
     return _read
 
@@ -542,6 +597,8 @@ def extract_forces(
     sections: list[str] | None = None,
     session: "EtabsSession | None" = None,
     tag: str | None = None,
+    force_unit: str = "model",
+    length_unit: str = "model",
 ) -> tuple:
     """Extract frame-element forces and (optionally) write CSVs.
 
@@ -554,6 +611,10 @@ def extract_forces(
     ``frames`` restricts the frame *objects* by name; ``sections`` restricts
     by assigned section name (AND-combined when both given, each optional).
     An empty/None section selection means no section filter.
+
+    ``force_unit`` / ``length_unit`` select the output unit system (default
+    ``"model"`` — the active model's own present units; see
+    :func:`_source_units` / :mod:`etabs_extractor.units`).
 
     If a ``session`` is passed (e.g. the test fake), it is used directly and
     no COM connection is attempted; otherwise one is created.
@@ -580,6 +641,8 @@ def extract_forces(
         name_filter=frames,
         session=session,
         tag=tag,
+        force_unit=force_unit,
+        length_unit=length_unit,
     )
 
 
@@ -589,11 +652,14 @@ def _read_point_reactions(
     combos: list[str] | None,
     cases: list[str] | None,
     coords: tuple,
+    uctx: _UnitCtx,
 ) -> list[JointReactionRecord]:
     """Read per-joint reactions for a single point across the selected loads.
 
     ``combos``/``cases`` discriminate each row's ``load_kind`` exactly as in
-    ``_read_frame_forces`` (by membership in the resolved lists).
+    ``_read_frame_forces`` (by membership in the resolved lists).  Force
+    /moment/coordinate values are scaled from the model's units to
+    ``uctx.dst``.
     """
     raw = session.joint_react(point, item_type_elm=0)
     if raw is None:
@@ -604,7 +670,9 @@ def _read_point_reactions(
         F1, F2, F3, M1, M2, M3,
     ) = raw
 
+    ff, mf, lf = uctx.force_factor, uctx.moment_factor, uctx.length_factor
     x, y, z = coords
+    x, y, z = _scale_opt(x, lf), _scale_opt(y, lf), _scale_opt(z, lf)
     records: list[JointReactionRecord] = []
     n = _to_int(NumberResults, default=0)
     for i in range(max(0, n)):
@@ -625,13 +693,14 @@ def _read_point_reactions(
                 load_name=name,
                 load_kind=kind,
                 step_type=_s(StepType, i),
-                # Convert model units (N / N·mm) to exported units (kN / kN·m).
-                F1=_f(F1, i) / BASE_FORCE_SCALE,
-                F2=_f(F2, i) / BASE_FORCE_SCALE,
-                F3=_f(F3, i) / BASE_FORCE_SCALE,
-                M1=_f(M1, i) / BASE_MOMENT_SCALE,
-                M2=_f(M2, i) / BASE_MOMENT_SCALE,
-                M3=_f(M3, i) / BASE_MOMENT_SCALE,
+                F1=_f(F1, i) * ff,
+                F2=_f(F2, i) * ff,
+                F3=_f(F3, i) * ff,
+                M1=_f(M1, i) * mf,
+                M2=_f(M2, i) * mf,
+                M3=_f(M3, i) * mf,
+                force_unit=uctx.dst.force,
+                length_unit=uctx.dst.length,
             )
         )
     return records
@@ -640,23 +709,29 @@ def _read_point_reactions(
 def _make_point_reader(elevation: float | None):
     """Return a per-point reader for :class:`ExtractKind` (base reactions).
 
-    Captures the optional ``elevation`` filter: a point whose ``z`` does not
-    match is skipped entirely (no reaction read), and unresolvable
+    Captures the optional ``elevation`` filter (in the *output* length unit,
+    i.e. the same unit the extraction was asked for): a point whose ``z``
+    does not match is skipped entirely (no reaction read), and unresolvable
     coordinates degrade to ``None`` slots instead of raising — mirroring the
     pre-refactor behavior of ``extract_base_reactions``.
     """
 
-    def _read(session, point, combos, cases) -> list[JointReactionRecord]:
+    def _read(session, point, combos, cases, uctx: _UnitCtx) -> list[JointReactionRecord]:
         try:
             coords = session.get_point_coords(point)
         except Exception as exc:  # noqa: BLE001 - coordinates are best-effort
             logger.debug("Point coordinate lookup failed for %r: %s", point, exc)
             coords = (None, None, None)
         if elevation is not None:
-            z = coords[2]
-            if z is None or not _z_match(z, elevation):
+            z = coords[2]  # raw, model-unit z (not yet scaled)
+            # Convert the requested (output-unit) elevation into model units
+            # to compare against the raw COM coordinate; tolerance is ~1mm
+            # expressed in the model's own length unit.
+            elevation_model = elevation / uctx.length_factor if uctx.length_factor else elevation
+            tol_model = 0.001 / LENGTH_TO_M[uctx.src.length]
+            if z is None or not _z_match(z, elevation_model, tol=tol_model):
                 return []
-        return _read_point_reactions(session, point, combos, cases, coords)
+        return _read_point_reactions(session, point, combos, cases, coords, uctx)
 
     return _read
 
@@ -676,12 +751,15 @@ def extract_base_reactions(
     only_loaded: bool = False,
     session: "EtabsSession | None" = None,
     tag: str | None = None,
+    force_unit: str = "model",
+    length_unit: str = "model",
 ) -> tuple:
     """Extract per-joint (base) reactions and (optionally) write CSVs.
 
     Reports restrained point objects. By default every point at any elevation
     is reported; pass ``elevation`` to restrict to points whose ``z``
-    coordinate matches that elevation (model length units, e.g. ``-16000``),
+    coordinate matches that elevation, **expressed in the output length
+    unit** (``length_unit``, e.g. metres if that's the model/output unit),
     which skips reading any other level.  Pass ``only_loaded=True`` to drop
     points where all six reaction components are zero (i.e. only supports that
     actually carry load).  Returns
@@ -690,6 +768,10 @@ def extract_base_reactions(
     (``base_<load>.csv``), ``all_base_reactions.csv``, ``base_envelope_summary.csv``
     and the separated ``base_envelope_min.csv`` / ``base_envelope_max.csv``.  A
     ``tag`` appends a suffix to every output filename.
+
+    ``force_unit`` / ``length_unit`` select the output unit system (default
+    ``"model"`` — the active model's own present units; see
+    :func:`_source_units` / :mod:`etabs_extractor.units`).
     """
     kind = ExtractKind(
         label="point",
@@ -717,6 +799,8 @@ def extract_base_reactions(
         post_filter=post_filter,
         session=session,
         tag=tag,
+        force_unit=force_unit,
+        length_unit=length_unit,
     )
 
 
@@ -753,8 +837,78 @@ def list_available(
         except Exception as exc:  # noqa: BLE001 - best-effort section inventory
             logger.debug("Could not list frame sections: %s", exc)
             info["section_names"] = []
+        try:
+            units = _source_units(session)
+            info["units"] = {"force": units.force, "length": units.length}
+        except Exception as exc:  # noqa: BLE001 - best-effort units
+            logger.debug("Could not read model present units: %s", exc)
+            info["units"] = {"force": "", "length": ""}
+        try:
+            info["elevations"] = list_elevations(session)
+        except Exception as exc:  # noqa: BLE001 - best-effort elevation list
+            logger.debug("Could not list model elevations: %s", exc)
+            info["elevations"] = []
         return info
     finally:
         if own_session:
             # Best-effort release of the helper we created (no-op on fakes).
             _release_helper(session)
+
+
+def list_elevations(session: "EtabsSession") -> list[dict]:
+    """Return the model's distinct point elevations, labelled by story.
+
+    Reads every point object's ``z`` coordinate (one COM call via
+    ``get_all_point_coords``) plus the story table (``get_story_elevations``,
+    best-effort — an empty story table just means unlabelled elevations), and
+    groups points into elevations within a ~1mm-equivalent tolerance of each
+    other, **expressed in the model's own length unit** (not hardcoded mm —
+    a model reported in metres needs a ~0.001 tolerance, not 1.0, or distinct
+    story elevations less than a metre apart wrongly merge). Returns a list
+    of ``{"z": float, "label": str, "n_points": int}`` dicts sorted by ``z``
+    ascending, in the model's own length unit — callers convert for display.
+    ``label`` is the matching story name, ``"Base"`` for the model's base
+    elevation, or ``""`` when no story matches within tolerance.
+    """
+    coords = session.get_all_point_coords()
+    zs = sorted({z for (_x, _y, z) in coords.values() if z is not None})
+    if not zs:
+        return []
+
+    try:
+        story_info = session.get_story_elevations()
+    except Exception as exc:  # noqa: BLE001 - labelling is best-effort
+        logger.debug("Could not read story elevations: %s", exc)
+        story_info = {"base": None, "stories": []}
+
+    base = story_info.get("base")
+    stories = story_info.get("stories") or []
+    src = _source_units(session)
+    tol = 0.001 / LENGTH_TO_M[src.length]
+
+    def _label(z: float) -> str:
+        if base is not None and _z_match(z, base, tol=tol):
+            return "Base"
+        for name, elev in stories:
+            if elev is not None and _z_match(z, elev, tol=tol):
+                return name
+        return ""
+
+    # Group raw z-values within tolerance of each other into one elevation
+    # entry (COM coordinates can carry tiny float noise).
+    groups: list[list[float]] = []
+    for z in zs:
+        if groups and _z_match(z, groups[-1][-1], tol=tol):
+            groups[-1].append(z)
+        else:
+            groups.append([z])
+
+    result: list[dict] = []
+    for group in groups:
+        z_repr = sum(group) / len(group)
+        n_points = sum(
+            1 for (_x, _y, pz) in coords.values()
+            if pz is not None and _z_match(pz, z_repr, tol=tol)
+        )
+        result.append({"z": z_repr, "label": _label(z_repr), "n_points": n_points})
+    return result

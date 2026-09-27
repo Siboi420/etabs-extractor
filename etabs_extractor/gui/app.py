@@ -1,551 +1,559 @@
 """Main application window for the etabs_extractor GUI.
 
-Composes the model/destination/tag rows, combo selection, plot settings and
-preview canvas, and wires the buttons to worker-threaded extraction /
-plotting.  All real work is delegated to
-:func:`~etabs_extractor.gui.service`; Tk is only used as the view layer.
-Creating an instance requires a display; importing the module does not.
+A sidebar (model, mode switch, load selection, mode-scoped filters, output,
+Extract) beside a tabbed workspace (Preview / Plot settings / CSV / Log).
+All real work is delegated to :func:`~etabs_extractor.gui.service` and run
+on a background thread via :class:`~etabs_extractor.gui.runner.BackgroundRunner`;
+customtkinter/Tk is only used as the view layer. Creating an instance
+requires a display; importing the module does not.
 """
 
 from __future__ import annotations
 
-import os
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+import queue
+
+import customtkinter as ctk
+from tkinter import messagebox
 
 from etabs_extractor.config import resolve_output_dir
-from etabs_extractor.gui.state import GuiSettings, parse_elevation
-from etabs_extractor.gui.service import (
-    build_extract_kwargs,
-    build_figure_kwargs,
-    build_plot_kwargs,
-    load_from_csv,
-    sanitize_tag,
+from etabs_extractor.gui.state import (
+    APPEARANCE_CHOICES,
+    FORCE_UNIT_CHOICES,
+    LENGTH_UNIT_CHOICES,
+    GuiSettings,
+    parse_elevation,
 )
-from etabs_extractor.gui.widgets.fields import DirectoryField, FileField, LabeledEntry
+from etabs_extractor.gui.service import (
+    build_elevation_labels,
+    build_figure_kwargs,
+    do_extract,
+    inspect_active_model,
+    load_from_csv,
+)
+from etabs_extractor.gui.runner import BackgroundRunner
+from etabs_extractor.gui.widgets.fields import DirectoryField, FileField, LabeledEntry, Section
 from etabs_extractor.gui.widgets.load_selection import LoadSelectionField
+from etabs_extractor.gui.widgets.log_panel import LogPanel
 from etabs_extractor.gui.widgets.plot_settings import PlotSettingsFrame
-from etabs_extractor.gui.widgets.preview import FramePreviewWindow, PlotPreviewWindow
+from etabs_extractor.gui.widgets.preview import BasePreviewPanel, FramePreviewPanel, load_beam_viewer
 
 
-class EtabsExtractorApp(tk.Tk):
+class EtabsExtractorApp(ctk.CTk):
     """The GUI root window."""
 
     def __init__(self) -> None:
+        # Must run before super().__init__(): customtkinter's periodic
+        # per-monitor DPI-awareness poll (~every 100ms) can mis-detect a
+        # scaling change on some Windows displays, briefly drop the window's
+        # alpha and force a scaling redraw across every widget — which
+        # interrupts an in-progress mouse drag and breaks the matplotlib
+        # toolbar's pan/zoom. Deactivating it keeps DPI scaling static
+        # (factor 1) for the life of the process; window/font sizes are
+        # otherwise unaffected since we don't rely on ctk's auto-DPI scaling.
+        ctk.deactivate_automatic_dpi_awareness()
         super().__init__()
+        ctk.set_appearance_mode("System")
+        ctk.set_default_color_theme("blue")
+
         self.title("etabs_extractor — base reactions & frame forces")
-        self.geometry("980x640")
-        self.minsize(760, 560)
+        self.geometry("1180x740")
+        self.minsize(980, 620)
 
         self._settings = GuiSettings()
-        self._runner = None
-        self._result = None      # last extraction/load result dict
-        self._preview_win = None # the open plot-preview pop-up (or None)
-        self._frame_preview_win = None  # the open frame-preview pop-up (or None)
+        self._runner: BackgroundRunner | None = None
+        self._pending_cb = None
+        self._result: dict | None = None
         self._poll_id = None
+        self._busy_widgets: list = []
+        # Populated by on_check_model / _on_check_done: the active model's
+        # own present units and elevation inventory (model length units),
+        # used to build the elevation combobox's labels in the currently
+        # selected output length unit.
+        self._model_units: dict = {"force": "", "length": ""}
+        self._elevations: list = []
 
         self._build_layout()
-        self._apply_mode()  # apply initial mode (base) visibility
-        self._drain_pending()
+        self._apply_mode()
+        self._set_log("Ready.")
 
     # ------------------------------------------------------------------ layout
     def _build_layout(self) -> None:
-        # Widgets scoped to the active extraction mode are registered here so
-        # the mode radios can show/hide them via pack()/pack_forget().  Default
-        # mode is "base", so base-only widgets are packed at build; the
-        # frame-only selector is created but not yet packed (revealed by
-        # _apply_mode).
-        self._base_only: dict[str, tuple] = {}
-        self._frame_only: dict[str, tuple] = {}
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
 
-        def _reg(target, key, widget, **kwargs):
-            target[key] = (widget, kwargs)
-            return widget
+        self._build_sidebar()
+        self._build_workspace()
+        self._build_status_bar()
 
-        # -- Model / destination / tag rows ---------------------------------
-        frame = ttk.LabelFrame(self, text="Model & output")
-        frame.pack(fill="x", padx=8, pady=4)
+    def _build_sidebar(self) -> None:
+        self.sidebar = ctk.CTkScrollableFrame(
+            self, width=340, corner_radius=0, label_text="etabs_extractor",
+        )
+        self.sidebar.grid(row=0, column=0, sticky="nsew")
+
+        # -- Model & output ---------------------------------------------
+        model_section = Section(self.sidebar, "Model & output")
+        model_section.pack(fill="x", pady=(0, 10))
         self.model_field = FileField(
-            frame, "Model", "",
+            model_section.body, "Model", "",
             filetypes="ETABS model", patterns=("*.EDB", "*.edb", "*.et"),
         )
-        self.model_field.pack(fill="x", padx=6, pady=3)
-        row = ttk.Frame(frame)
-        row.pack(fill="x", padx=6, pady=3)
-        self.check_btn = ttk.Button(
-            row, text="Check active model", command=self.on_check_model
+        self.model_field.pack(fill="x", pady=3)
+
+        check_row = ctk.CTkFrame(model_section.body, fg_color="transparent")
+        check_row.pack(fill="x", pady=(3, 0))
+        self.check_btn = ctk.CTkButton(
+            check_row, text="Check active model", command=self.on_check_model, width=160,
         )
         self.check_btn.pack(side="left")
-        self.model_status = tk.StringVar(value="")
-        ttk.Label(row, textvariable=self.model_status, foreground="#444").pack(side="left", padx=8)
+        self._busy_widgets.append(self.check_btn)
+
+        self.model_status_var = ctk.StringVar(value="No active model checked.")
+        ctk.CTkLabel(
+            model_section.body, textvariable=self.model_status_var, anchor="w",
+            text_color="gray", wraplength=280, justify="left",
+        ).pack(fill="x", pady=(4, 6))
 
         self.output_field = DirectoryField(
-            frame, "Output dir", str(resolve_output_dir())
+            model_section.body, "Output dir", str(resolve_output_dir()),
         )
-        self.output_field.pack(fill="x", padx=6, pady=3)
-        self.tag_field = LabeledEntry(frame, "Tag", "")
-        self.tag_field.pack(fill="x", padx=6, pady=3)
+        self.output_field.pack(fill="x", pady=3)
+        self.tag_field = LabeledEntry(model_section.body, "Tag", "")
+        self.tag_field.pack(fill="x", pady=3)
+        self.tag_hint_var = ctk.StringVar(value="")
+        ctk.CTkLabel(
+            model_section.body, textvariable=self.tag_hint_var, text_color="gray", anchor="w",
+        ).pack(fill="x")
+        self.tag_field.var.trace_add("write", lambda *a: self._update_tag_hint())
 
-        # -- Extraction mode switch (radio; default base) --------------------
-        mode = ttk.LabelFrame(self, text="Extraction mode")
-        mode.pack(fill="x", padx=8, pady=4)
-        self.mode_var = tk.StringVar(value="base")
-        for _label, _val in (( "Base reactions", "base"), ("Frame forces", "frame")):
-            ttk.Radiobutton(
-                mode, text=_label, value=_val,
-                variable=self.mode_var, command=self._apply_mode,
-            ).pack(side="left", padx=6)
-
-        # -- Load selection --------------------------------------------------
-        load = ttk.LabelFrame(self, text="Load selection")
-        load.pack(fill="x", padx=8, pady=4)
-        self.load_field = LoadSelectionField(load)
-        self.load_field.pack(fill="x", padx=6, pady=3)
-        ttk.Label(
-            load, text="(Check active model to load combos/cases; multi-select; "
-                      "empty = all combos)",
-            foreground="#777", font=("", 8),
-        ).pack(anchor="w", padx=14)
-        opt = ttk.Frame(load)
-        opt.pack(fill="x", padx=6, pady=3)
-        # Base-only controls (elevation + only-loaded) live in the same row as
-        # the shared toggles; they are removed individually in frame mode.
-        self.elevation_field = LabeledEntry(load, "Elevation", "", width=14)
-        _reg(self._base_only, "elevation", self.elevation_field, side="left", padx=6, pady=3)
-        self.elevation_field.pack(side="left", padx=6, pady=3)
-        self.only_loaded_var = tk.BooleanVar(value=False)
-        _ol_cb = ttk.Checkbutton(opt, text="Only loaded supports", variable=self.only_loaded_var)
-        _reg(self._base_only, "only_loaded", _ol_cb, side="left", padx=8)
-        _ol_cb.pack(side="left", padx=8)
-        self.run_analysis_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opt, text="Run analysis", variable=self.run_analysis_var).pack(side="left", padx=8)
-        self.attach_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            opt, text="Attach (not launch)", variable=self.attach_var
-        ).pack(side="left", padx=8)
-        # Frame-only control: section multi-select (hidden in base mode).
-        sec_frame = ttk.LabelFrame(load, text="Section filter")
-        _reg(self._frame_only, "section_frame", sec_frame, fill="x", padx=6, pady=2)
-        inner = ttk.Frame(sec_frame)
-        inner.pack(fill="x", padx=4, pady=2)
-        self.section_listbox = tk.Listbox(
-            inner, selectmode="multiple", height=4, exportselection=False,
+        opt_row = ctk.CTkFrame(model_section.body, fg_color="transparent")
+        opt_row.pack(fill="x", pady=(4, 0))
+        self.attach_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(opt_row, text="Attach (not launch)", variable=self.attach_var).pack(
+            side="left", padx=(0, 10),
         )
-        self.section_listbox.pack(side="left", fill="x", expand=True)
-        scroll = ttk.Scrollbar(inner, orient="vertical", command=self.section_listbox.yview)
-        scroll.pack(side="left", fill="y")
-        self.section_listbox.configure(yscrollcommand=scroll.set)
-        btn_row = ttk.Frame(sec_frame)
-        btn_row.pack(fill="x", padx=4, pady=2)
-        ttk.Button(btn_row, text="Select all", command=self._select_all_sections).pack(side="left", padx=2)
-        ttk.Button(btn_row, text="Clear all", command=self._clear_all_sections).pack(side="left", padx=2)
-        ttk.Label(btn_row, text="(empty = all sections)",
-                  foreground="#777", font=("", 8)).pack(side="left", padx=6)
+        self.run_analysis_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(opt_row, text="Run analysis", variable=self.run_analysis_var).pack(side="left")
 
-        # -- Frame-force preview button (frame-mode only) --------------------
-        fprow = ttk.Frame(self)
-        ttk.Button(fprow, text="Frame force preview", command=self.on_open_frame_preview).pack(side="left", padx=4)
-        ttk.Label(fprow, text="View beam force diagrams (P, V2, M3) in a pop-up",
-                     foreground="#777", font=("", 8)).pack(side="left", padx=4)
-        _reg(self._frame_only, "frame_preview", fprow, fill="x", padx=8, pady=2)
+        # -- Units ----------------------------------------------------------
+        units_section = Section(self.sidebar, "Units")
+        units_section.pack(fill="x", pady=(0, 10))
+        units_row = ctk.CTkFrame(units_section.body, fg_color="transparent")
+        units_row.pack(fill="x")
+        ctk.CTkLabel(units_row, text="Force", anchor="w", width=60).pack(side="left")
+        self.force_unit_var = ctk.StringVar(value="model")
+        ctk.CTkOptionMenu(
+            units_row, values=list(FORCE_UNIT_CHOICES), variable=self.force_unit_var,
+            width=90, command=self._on_units_changed,
+        ).pack(side="left", padx=(0, 12))
+        ctk.CTkLabel(units_row, text="Length", anchor="w", width=60).pack(side="left")
+        self.length_unit_var = ctk.StringVar(value="model")
+        ctk.CTkOptionMenu(
+            units_row, values=list(LENGTH_UNIT_CHOICES), variable=self.length_unit_var,
+            width=90, command=self._on_units_changed,
+        ).pack(side="left")
+        self.units_hint_var = ctk.StringVar(value="")
+        ctk.CTkLabel(
+            units_section.body, textvariable=self.units_hint_var, text_color="gray",
+            anchor="w", wraplength=290, justify="left",
+        ).pack(fill="x", pady=(4, 0))
+        self._update_units_hint()
 
-        # -- Plot settings (base-only) ----------------------------------------
-        self.plot_settings = PlotSettingsFrame(self, self._settings)
-        _reg(self._base_only, "plot_settings", self.plot_settings, fill="x", padx=8, pady=4)
-        self.plot_settings.pack(fill="x", padx=8, pady=4)
-        self.plot_after_var = tk.BooleanVar(value=False)
-        _pa_cb = ttk.Checkbutton(
-            self, text="Plot after extract (save figures to output dir)",
-            variable=self.plot_after_var,
+        # -- Extraction mode ----------------------------------------------
+        mode_section = Section(self.sidebar, "Extraction mode")
+        mode_section.pack(fill="x", pady=(0, 10))
+        self.mode_var = ctk.StringVar(value="base")
+        self.mode_switch = ctk.CTkSegmentedButton(
+            mode_section.body, values=["Base reactions", "Frame forces"],
+            command=self._on_mode_changed,
         )
-        _reg(self._base_only, "plot_after", _pa_cb, anchor="w", padx=14, pady=2)
-        _pa_cb.pack(anchor="w", padx=14, pady=2)
+        self.mode_switch.set("Base reactions")
+        self.mode_switch.pack(fill="x")
 
-        # -- CSV plotting (no ETABS) — base-only -----------------------------
-        csv = ttk.LabelFrame(self, text="Plot from existing CSV (no ETABS)")
-        _reg(self._base_only, "csv", csv, fill="x", padx=8, pady=4)
-        csv.pack(fill="x", padx=8, pady=4)
-        self.csv_field = FileField(
-            csv, "CSV file", "", filetypes="CSV", patterns=("*.csv",)
+        # -- Load selection -------------------------------------------------
+        loads_section = Section(self.sidebar, "Load selection")
+        loads_section.pack(fill="x", pady=(0, 10))
+        self.load_field = LoadSelectionField(
+            loads_section.body, label="Loads", title="Select loads", empty_summary="all combos",
         )
-        self.csv_field.pack(fill="x", padx=6, pady=3)
-        row2 = ttk.Frame(csv)
-        row2.pack(fill="x", padx=6, pady=3)
-        self.load_preview_btn = ttk.Button(
-            row2, text="Load preview", command=self.on_load_preview
+        self.load_field.pack(fill="x", pady=2)
+        ctk.CTkLabel(
+            loads_section.body,
+            text="(Check active model to load combos/cases; empty = all combos)",
+            text_color="gray", wraplength=280, justify="left", anchor="w",
+        ).pack(fill="x")
+
+        # -- Mode-scoped filter containers (one packed at a time) -----------
+        self.base_filter = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        base_inner = Section(self.base_filter, "Base filters")
+        base_inner.pack(fill="x")
+        self.elevation_label_var = ctk.StringVar(value="Elevation (model)")
+        ctk.CTkLabel(base_inner.body, textvariable=self.elevation_label_var, anchor="w").pack(
+            fill="x", pady=(0, 2),
         )
-        self.load_preview_btn.pack(side="left")
-
-        # -- Preview pop-up trigger (manual, base-only) ----------------------
-        # The plan-view preview lives in a separate pop-up window
-        # (PlotPreviewWindow); the main window only holds an opener button.
-        prow = ttk.Frame(self)
-        _reg(self._base_only, "preview", prow, fill="x", padx=8, pady=4)
-        prow.pack(fill="x", padx=8, pady=4)
-        ttk.Button(prow, text="Plot preview", command=self.on_open_preview).pack(side="left", padx=4)
-        ttk.Label(prow, text="Open the plot preview in a separate pop-up window",
-                     foreground="#777", font=("", 8)).pack(side="left", padx=4)
-
-        # -- Actions + progress ----------------------------------------------
-        self.progress = ttk.Progressbar(self, mode="determinate", maximum=100, value=0)
-        self.progress.pack(fill="x", padx=8, pady=(6, 2))
-        self.log_var = tk.StringVar(value="Ready.")
-        ttk.Label(self, textvariable=self.log_var, anchor="w").pack(
-            fill="x", padx=8, pady=(0, 2)
+        self.elevation_var = ctk.StringVar(value="")
+        self.elevation_combo = ctk.CTkComboBox(
+            base_inner.body, values=[], variable=self.elevation_var,
         )
-        actions = ttk.Frame(self)
-        actions.pack(fill="x", padx=8, pady=4)
-        self.extract_btn = ttk.Button(actions, text="Extract", command=self.on_extract)
-        self.extract_btn.pack(side="left")
-        ttk.Button(actions, text="Quit", command=self.destroy).pack(side="right")
+        self.elevation_combo.pack(fill="x", pady=(0, 3))
+        ctk.CTkLabel(
+            base_inner.body,
+            text="(Check active model to list elevations; or type a value)",
+            text_color="gray", wraplength=280, justify="left", anchor="w",
+        ).pack(fill="x")
+        self.only_loaded_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(base_inner.body, text="Only loaded supports", variable=self.only_loaded_var).pack(
+            anchor="w", pady=2,
+        )
+        self.plot_after_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(base_inner.body, text="Plot after extract", variable=self.plot_after_var).pack(
+            anchor="w", pady=2,
+        )
 
-    # --------------------------------------------------------------- helpers
-    def _select_all_sections(self) -> None:
-        self.section_listbox.selection_set(0, "end")
+        self.frame_filter = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        frame_inner = Section(self.frame_filter, "Section filter")
+        frame_inner.pack(fill="x")
+        self.section_field = LoadSelectionField(
+            frame_inner.body, label="Sections", title="Select sections",
+            empty_summary="all sections", kind_a="section", kind_b="_unused",
+        )
+        self.section_field.pack(fill="x", pady=2)
+        ctk.CTkLabel(
+            frame_inner.body, text="(empty = all sections)", text_color="gray", anchor="w",
+        ).pack(fill="x")
 
-    def _clear_all_sections(self) -> None:
-        self.section_listbox.selection_clear(0, "end")
+        # -- Extract ---------------------------------------------------------
+        self.extract_btn = ctk.CTkButton(
+            self.sidebar, text="Extract", command=self.on_extract, height=38,
+            font=ctk.CTkFont(weight="bold"),
+        )
+        self.extract_btn.pack(fill="x", pady=(6, 12))
+        self._busy_widgets.append(self.extract_btn)
 
-    # --------------------------------------------------------------- settings
+    def _build_workspace(self) -> None:
+        self.workspace = ctk.CTkFrame(self, fg_color="transparent")
+        self.workspace.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
+        self.workspace.grid_rowconfigure(0, weight=1)
+        self.workspace.grid_columnconfigure(0, weight=1)
+
+        self.tabs = ctk.CTkTabview(self.workspace)
+        self.tabs.grid(row=0, column=0, sticky="nsew")
+        self.tabs.add("Preview")
+        self.tabs.add("Plot settings")
+        self.tabs.add("CSV")
+        self.tabs.add("Log")
+
+        preview_tab = self.tabs.tab("Preview")
+        preview_tab.grid_rowconfigure(0, weight=1)
+        preview_tab.grid_columnconfigure(0, weight=1)
+        self.base_preview = BasePreviewPanel(
+            preview_tab, settings_provider=self._collect_settings,
+            figure_builder=self._build_preview_figure, log=self._set_log,
+        )
+        self.frame_preview = FramePreviewPanel(
+            preview_tab, figure_builder=self._build_frame_preview_figure,
+            batch_figure_builder=self._build_batch_frame_preview_figure, log=self._set_log,
+        )
+        self.base_preview.grid(row=0, column=0, sticky="nsew")
+        # frame_preview is grid()-ed/forgotten by _apply_mode.
+
+        plot_tab = self.tabs.tab("Plot settings")
+        self.plot_settings = PlotSettingsFrame(plot_tab, self._settings)
+        self.plot_settings.pack(fill="both", expand=True, padx=4, pady=4)
+
+        csv_tab = self.tabs.tab("CSV")
+        ctk.CTkLabel(
+            csv_tab, text="Plot from an existing base-reaction CSV (no ETABS needed)", anchor="w",
+        ).pack(fill="x", padx=6, pady=(6, 2))
+        self.csv_field = FileField(csv_tab, "CSV file", "", filetypes="CSV", patterns=("*.csv",))
+        self.csv_field.pack(fill="x", padx=6, pady=4)
+        self.plot_output_field = DirectoryField(csv_tab, "Plot output (optional)", "")
+        self.plot_output_field.pack(fill="x", padx=6, pady=4)
+        ctk.CTkLabel(
+            csv_tab, text="(blank = save next to the CSV file)", text_color="gray", anchor="w",
+        ).pack(fill="x", padx=6)
+        self.load_preview_btn = ctk.CTkButton(
+            csv_tab, text="Load preview", command=self.on_load_preview, width=130,
+        )
+        self.load_preview_btn.pack(anchor="w", padx=6, pady=4)
+        self._busy_widgets.append(self.load_preview_btn)
+
+        log_tab = self.tabs.tab("Log")
+        self.log_panel = LogPanel(log_tab)
+        self.log_panel.pack(fill="both", expand=True, padx=4, pady=4)
+
+    def _build_status_bar(self) -> None:
+        status = ctk.CTkFrame(self, fg_color="transparent")
+        status.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
+        status.grid_columnconfigure(1, weight=1)
+
+        self.progress = ctk.CTkProgressBar(status, mode="indeterminate", width=140)
+        self.progress.grid(row=0, column=0, sticky="w", padx=(0, 10))
+
+        self.status_var = ctk.StringVar(value="Ready.")
+        ctk.CTkLabel(status, textvariable=self.status_var, anchor="w").grid(
+            row=0, column=1, sticky="ew",
+        )
+
+        ctk.CTkLabel(status, text="Appearance:").grid(row=0, column=2, padx=(10, 4))
+        self.appearance_var = ctk.StringVar(value="System")
+        ctk.CTkOptionMenu(
+            status, values=list(APPEARANCE_CHOICES), variable=self.appearance_var,
+            width=90, command=self._on_appearance_changed,
+        ).grid(row=0, column=3)
+
+    # -------------------------------------------------------------- mode switch
+    def _on_mode_changed(self, label: str) -> None:
+        self.mode_var.set("base" if label == "Base reactions" else "frame")
+        self._apply_mode()
+
     def _apply_mode(self) -> None:
-        """Show/hide mode-scoped widgets as the extract-mode radio changes.
+        """Show/hide mode-scoped widgets as the extract-mode switch changes.
 
-        ``base`` shows the base-only controls (elevation, only-loaded, plot
-        settings, CSV, preview) and hides the frame selector; ``frame`` does the
-        reverse.
+        ``base`` shows the base-only filters + preview; ``frame`` shows the
+        section filter + frame preview instead.
         """
         base = self.mode_var.get() == "base"
-        self._apply_group(self._base_only if base else self._frame_only, show=True)
-        self._apply_group(self._frame_only if base else self._base_only, show=False)
+        if base:
+            self.frame_filter.pack_forget()
+            self.base_filter.pack(fill="x", pady=(0, 10), before=self.extract_btn)
+            self.frame_preview.grid_forget()
+            self.base_preview.grid(row=0, column=0, sticky="nsew")
+        else:
+            self.base_filter.pack_forget()
+            self.frame_filter.pack(fill="x", pady=(0, 10), before=self.extract_btn)
+            self.base_preview.grid_forget()
+            self.frame_preview.grid(row=0, column=0, sticky="nsew")
 
-    def _apply_group(self, group: dict, *, show: bool) -> None:
-        for _widget, _kwargs in group.values():
-            try:
-                if show:
-                    _widget.pack(** _kwargs)
-                else:
-                    _widget.pack_forget()
-            except tk.TclError:
-                pass
+    def _on_appearance_changed(self, value: str) -> None:
+        ctk.set_appearance_mode(value)
+        self._settings.appearance_mode = value
+        self.base_preview.preview.sync_theme()
+        self.frame_preview.preview.sync_theme()
 
-    def _collect_settings(self, *, not_plot: bool = False) -> GuiSettings:
+    def _update_tag_hint(self) -> None:
+        from etabs_extractor.gui.service import sanitize_tag
+
+        suffix = sanitize_tag(self.tag_field.get())
+        self.tag_hint_var.set(f"Suffix: _{suffix}" if suffix else "")
+
+    # -------------------------------------------------------------- units
+    def _on_units_changed(self, _value: str | None = None) -> None:
+        """Re-render the units hint and the elevation combobox's labels
+        whenever the Force/Length output-unit choice changes."""
+        self._update_units_hint()
+        self._refresh_elevation_choices()
+
+    def _update_units_hint(self) -> None:
+        model = self._model_units or {}
+        model_force, model_length = model.get("force") or "", model.get("length") or ""
+        force = self.force_unit_var.get()
+        length = self.length_unit_var.get()
+        out_force = model_force if force == "model" else force
+        out_length = model_length if length == "model" else length
+        if model_force and model_length:
+            model_label = f"{model_force}, {model_length}"
+        else:
+            model_label = "unknown (Check active model)"
+        if out_force and out_length:
+            out_label = f"{out_force}, {out_force}·{out_length}, {out_length}"
+        else:
+            out_label = "model (no conversion)"
+        self.units_hint_var.set(f"Model: {model_label}  →  Output: {out_label}")
+
+    def _refresh_elevation_choices(self) -> None:
+        """Rebuild the elevation combobox's values in the current output
+        length unit, keeping the user's typed/selected value if possible."""
+        length = self.length_unit_var.get()
+        model_length = (self._model_units or {}).get("length") or "mm"
+        labels = build_elevation_labels(self._elevations, model_length, length)
+        self.elevation_combo.configure(values=labels)
+        shown_length = model_length if length == "model" else length
+        self.elevation_label_var.set(f"Elevation ({shown_length})")
+
+    # ------------------------------------------------------------ settings
+    def _collect_settings(self) -> GuiSettings:
         s = GuiSettings()
         s.model_path = self.model_field.get()
         s.output_dir = self.output_field.get()
         s.tag = self.tag_field.get()
         s.extract_mode = self.mode_var.get()
         s.selected_combos, s.selected_cases = self.load_field.get_selected()
-        s.run_analysis = self.run_analysis_var.get()
-        s.attach = self.attach_var.get()
+        s.run_analysis = bool(self.run_analysis_var.get())
+        s.attach = bool(self.attach_var.get())
+        s.appearance_mode = self.appearance_var.get()
+        s.force_unit = self.force_unit_var.get()
+        s.length_unit = self.length_unit_var.get()
         if s.extract_mode == "frame":
-            sel = self.section_listbox.curselection()
-            s.selected_sections = [self.section_listbox.get(i) for i in sel]
+            sections, _ = self.section_field.get_selected()
+            s.selected_sections = sections
             s.selected_frames = []
-            return s
-        s.elevation = self.elevation_field.get()
-        s.only_loaded = self.only_loaded_var.get()
-        s.csv_path = self.csv_field.get()
-        s.plot_after_extract = self.plot_after_var.get()
+        else:
+            s.elevation = self.elevation_var.get()
+            s.only_loaded = bool(self.only_loaded_var.get())
+            s.csv_path = self.csv_field.get()
+            s.plot_output_dir = self.plot_output_field.get()
+            s.plot_after_extract = bool(self.plot_after_var.get())
         self.plot_settings.to_settings(s)
         return s
 
+    # ---------------------------------------------------------------- log/status
+    def _set_log(self, text: str) -> None:
+        self.status_var.set(text)
+        if hasattr(self, "log_panel"):
+            self.log_panel.append(text)
+
+    def _set_busy(self, busy: bool) -> None:
+        state = "disabled" if busy else "normal"
+        for w in self._busy_widgets:
+            w.configure(state=state)
+        if busy:
+            self.progress.start()
+        else:
+            self.progress.stop()
+
     # ---------------------------------------------------------------- actions
     def on_check_model(self) -> None:
-        from etabs_extractor.gui.runner import BackgroundRunner
-        from etabs_extractor.gui.service import inspect_active_model
-
+        """Attach to the active ETABS model and populate the load/section pickers."""
         self._set_log("Checking active model...")
-        self.check_btn.configure(state="disabled")
+        self._start_job(inspect_active_model, attach=bool(self.attach_var.get()))
+        self._pending_cb = self._on_check_done
 
-        def _work():
-            try:
-                return ("ok", inspect_active_model(attach=self.attach_var.get()))
-            except Exception as exc:  # noqa: BLE001
-                return ("err", str(exc))
-
-        runner = BackgroundRunner(_work)
-        self._runner = runner
-        self._poll_id = self.after(80, lambda: self._poll(runner, self._on_check_done))
-        runner.start()
-
-    def _on_check_done(self, payload):
-        self.check_btn.configure(state="normal")
-        kind, value = payload if isinstance(payload, tuple) else ("ok", None)
-        if kind == "ok" and isinstance(value, dict):
-            model_path = value.get("model_path") or ""
-            combos = list(value.get("combos") or [])
-            cases = list(value.get("cases") or [])
-            sections = list(value.get("sections") or [])
-            frames = list(value.get("frames") or [])
-            if model_path:
-                self.model_field.set(model_path)
-                self.model_status.set(f"Active: {model_path}")
-                self._set_log(f"Detected active model: {model_path}")
-            else:
-                self.model_status.set("No active model / empty filename.")
-                self._set_log("No active model filename returned.")
-            # Populate the load dropdown with the model's combos/cases.
-            self.load_field.set_items(combos, cases)
-            # Populate the section listbox for frame mode.
-            self.section_listbox.delete(0, "end")
-            for s in sections:
-                self.section_listbox.insert("end", s)
-            self._set_log(
-                f"Check model: {len(sections)} section(s) found: {sections}"
-            )
-            n_combos = len(combos)
-            n_cases = len(cases)
-            self._set_log(
-                f"Active model has {n_combos} combo(s), {n_cases} case(s), "
-                f"{len(frames)} frame(s), {len(sections)} section(s)."
-            )
-        else:
-            err = str(value) if value else "unknown error"
-            self.model_status.set(f"Failed: {err}")
-            self._set_log(f"Check failed: {err}")
+    def _on_check_done(self, info: dict) -> None:
+        self.model_field.set(info.get("model_path", ""))
+        combos = info.get("combos", [])
+        cases = info.get("cases", [])
+        sections = info.get("sections", [])
+        self.load_field.set_items(combos, cases)
+        self.section_field.set_items(sections, [])
+        self._model_units = info.get("units") or {"force": "", "length": ""}
+        self._elevations = info.get("elevations") or []
+        self._update_units_hint()
+        self._refresh_elevation_choices()
+        self.model_status_var.set(
+            f"{info.get('model_path') or 'No active model'} — "
+            f"{len(combos)} combos, {len(cases)} cases, {len(sections)} sections"
+        )
+        self._set_log("Active model checked.")
 
     def on_extract(self) -> None:
+        """Collect settings and run the extraction workflow in the background."""
         settings = self._collect_settings()
-        self._settings = settings
-        # Validate elevation early for a clear message.
         try:
             parse_elevation(settings.elevation)
         except ValueError as exc:
             messagebox.showerror("Invalid elevation", str(exc))
             return
-        self._set_log("Extracting... (in background)")
-        self._set_progress(0)
+        self._settings = settings
+        self._set_log("Extracting...")
+        self._start_job(do_extract, settings)
+        self._pending_cb = self._on_extract_done
 
-        from etabs_extractor.gui.runner import BackgroundRunner
-        from etabs_extractor.gui.service import do_extract
-
-        runner = BackgroundRunner(do_extract, settings)
-        self._runner = runner
-        self._poll_id = self.after(80, lambda: self._poll(runner, self._on_extract_done))
-        runner.start()
-
-    def _on_extract_done(self, result):
+    def _on_extract_done(self, result: dict) -> None:
         self._result = result
-        self._set_progress(100)
-        df = result.get("df")
         load_names = result.get("load_names") or []
-        mode = self.mode_var.get()
-        if df is not None and len(df) > 0:
-            unit = "rows" if mode == "base" else "force records"
-            self._set_log(
-                f"Extracted {len(df)} {unit} across {len(load_names)} load(s)."
-            )
-        else:
-            self._set_log("Extraction produced no rows.")
-        # Refresh any open preview pop-ups with the new result.
-        self._refresh_preview(result)
-        self._refresh_frame_preview(result)
+        df = result.get("df")
+        rows = len(df) if df is not None else 0
+        self._set_log(f"Extraction complete: {rows} row(s) across {len(load_names)} load(s).")
         plot_paths = result.get("plot_paths") or []
-        nrows = len(df) if df is not None else 0
-        self._set_log(f"Extracted {nrows} rows; saved {len(plot_paths)} figure(s).")
+        if plot_paths:
+            self._set_log(f"Saved {len(plot_paths)} plot(s) to {result.get('output_dir')}")
+        self._refresh_preview()
 
     def on_load_preview(self) -> None:
+        """Load a base reaction CSV (no ETABS) and preview it."""
         settings = self._collect_settings()
+        if not settings.csv_path:
+            messagebox.showwarning("Missing CSV", "Please select a CSV file first.")
+            return
         self._settings = settings
-        from etabs_extractor.gui.runner import BackgroundRunner
-        from etabs_extractor.gui.service import load_from_csv
+        self._set_log("Loading CSV...")
+        self._start_job(load_from_csv, settings)
+        self._pending_cb = self._on_csv_done
 
-        self._set_log("Loading CSV preview...")
-        runner = BackgroundRunner(load_from_csv, settings)
-        self._runner = runner
-        self._poll_id = self.after(80, lambda: self._poll(runner, self._on_csv_done))
-        runner.start()
-
-    def _on_csv_done(self, result):
+    def _on_csv_done(self, result: dict) -> None:
         self._result = result
         load_names = result.get("load_names") or []
         df = result.get("df")
-        self._set_log(
-            f"Loaded CSV with {len(df)} rows across {len(load_names)} load(s)."
-        )
-        # Refresh an open preview pop-up with the new result (manual open).
-        self._refresh_preview(result)
+        rows = len(df) if df is not None else 0
+        self._set_log(f"Loaded CSV with {rows} row(s) across {len(load_names)} load(s).")
+        self._refresh_preview()
 
-    # ---------------------------------------------------------------- preview
-    def on_open_preview(self) -> None:
-        """Open (or re-raise) the separate plot-preview pop-up window.
-
-        Manual only: does nothing auto after Extract / Load-preview.  If a
-        result is already loaded the pop-up is populated from it immediately.
-        """
-        if self._preview_win is not None and self._preview_win.is_alive():
-            self._preview_win.lift()
-            if self._result is not None:
-                self._preview_win.set_result(self._result)
+    def _refresh_preview(self) -> None:
+        if self._result is None:
             return
-        self._preview_win = PlotPreviewWindow(
-            self,
-            settings_provider=self._collect_settings,
-            figure_builder=self._build_preview_figure,
-            log=self._set_log,
-            closed=self._on_preview_closed,
-        )
-        if self._result is not None:
-            self._preview_win.set_result(self._result)
+        if self.mode_var.get() == "frame":
+            self.frame_preview.set_result(self._result)
+        else:
+            self.base_preview.set_result(self._result)
+        self.tabs.set("Preview")
 
-    def _on_preview_closed(self, window) -> None:
-        """Called when the pop-up is closed; drop the stale reference."""
-        if self._preview_win is window:
-            self._preview_win = None
-
+    # ------------------------------------------------------------- preview figures
     def _build_preview_figure(self, df, load_name, settings):
-        """Build one preview figure via the shared plots layer (lazy mpl)."""
+        """Build one base-reaction preview figure via the shared plots layer."""
         from etabs_extractor.plots import build_base_reactions_figure
-        from etabs_extractor.gui.service import build_figure_kwargs
 
-        return build_base_reactions_figure(
-            df, load_name, **build_figure_kwargs(settings)
-        )
+        return build_base_reactions_figure(df, load_name, **build_figure_kwargs(settings))
 
-    def _refresh_preview(self, result: dict) -> None:
-        """Point an already-open preview pop-up at the latest result."""
-        win = getattr(self, "_preview_win", None)
-        if win is not None and win.is_alive():
-            win.set_result(result)
+    def _build_frame_preview_figure(self, df, frame, load_name, section, *, step_type=None):
+        """Build a 3-panel beam force diagram figure (P, V2, M3)."""
+        bv = load_beam_viewer()
+        return bv.build_frame_figure(df, frame, load_name, section, step_type=step_type)
 
-    # ---------------------------------------------------------------- frame preview
-
-    def on_open_frame_preview(self) -> None:
-        """Open (or re-raise) the frame-force diagram preview pop-up."""
-        if self._frame_preview_win is not None and self._frame_preview_win.is_alive():
-            self._frame_preview_win.lift()
-            if self._result is not None:
-                self._frame_preview_win.set_result(self._result)
-            return
-        self._frame_preview_win = FramePreviewWindow(
-            self,
-            figure_builder=self._build_frame_preview_figure,
-            batch_figure_builder=self._build_batch_frame_preview_figure,
-            log=self._set_log,
-            closed=self._on_frame_preview_closed,
-        )
-        if self._result is not None:
-            self._frame_preview_win.set_result(self._result)
-
-    def _on_frame_preview_closed(self, window) -> None:
-        if self._frame_preview_win is window:
-            self._frame_preview_win = None
-
-    def _build_frame_preview_figure(self, df, frame, load_name, section, *,
-                                    step_type=None):
-        """Build a 3-panel beam force diagram figure (P, V2, M3).
-
-        ``beam_viewer.py`` lives at the repo root (one level up from
-        ``etabs_extractor/``), so we add its parent to ``sys.path``
-        before importing.
-        """
-        import os as _os
-        import sys as _sys
-        _repo_root = _os.path.abspath(
-            _os.path.join(_os.path.dirname(__file__), "..", "..")
-        )
-        if _repo_root not in _sys.path:
-            _sys.path.insert(0, _repo_root)
-        from beam_viewer import build_frame_figure  # noqa: PLC0415
-        return build_frame_figure(df, frame, load_name, section,
-                                  step_type=step_type)
-
-    def _build_batch_frame_preview_figure(self, df, load_name, section,
-                                          length_mm, *, force_col="M3",
-                                          step_type=None):
+    def _build_batch_frame_preview_figure(self, df, load_name, section, length_mm, *,
+                                          force_col="M3", step_type=None):
         """Build a multi-panel batch figure for all beams at the given
         section + length, sorted by descending peak |force_col|."""
-        import os as _os
-        import sys as _sys
-        _repo_root = _os.path.abspath(
-            _os.path.join(_os.path.dirname(__file__), "..", "..")
-        )
-        if _repo_root not in _sys.path:
-            _sys.path.insert(0, _repo_root)
-        from beam_viewer import build_batch_frame_figure  # noqa: PLC0415
-        return build_batch_frame_figure(
-            df, load_name, section, length_mm,
-            force_col=force_col, step_type=step_type,
+        bv = load_beam_viewer()
+        return bv.build_batch_frame_figure(
+            df, load_name, section, length_mm, force_col=force_col, step_type=step_type,
         )
 
-    # -------------------------------------------------------- worker draining
-    def _drain_pending(self, limit: int = 50000) -> None:
-        """Drain any completed runner result (used on startup / after a poll)."""
-        if not self._runner:
-            return
-        q = self._runner.queue
-        got = False
-        try:
-            while True:
-                kind, payload = q.get_nowait()
-                got = True
-                if kind == "result":
-                    # Deliver to the pending callback, then reset.
-                    cb = getattr(self, "_pending_cb", None)
-                    if cb:
-                        cb(payload)
-                    self._pending_cb = None
-                    self._runner = None
-                    break
-                elif kind == "error":
-                    self._set_log(f"Error: {payload}")
-                    messagebox.showerror("etabs_extractor", f"{payload}")
-                    self._pending_cb = None
-                    self._runner = None
-                    break
-                elif kind == "done":
-                    break
-        except Exception:  # noqa: BLE001 - empty queue
-            pass
-        if got:
-            self._poll_id = self.after(80, lambda: self._poll(self._runner, None)) \
-                if self._runner else None
+    # -------------------------------------------------------- background jobs
+    def _start_job(self, fn, *args, **kwargs) -> None:
+        """Run ``fn(*args, **kwargs)`` on a background thread and begin polling."""
+        self._set_busy(True)
+        self._runner = BackgroundRunner(fn, *args, **kwargs)
+        self._runner.start()
+        self._poll_id = self.after(80, self._poll)
 
-    def _poll(self, runner, callback) -> None:
-        """Poll the runner queue; invoke ``callback(payload)`` on a result."""
-        if runner is None or runner is not self._runner:
+    def _poll(self) -> None:
+        runner = self._runner
+        if runner is None:
             return
-        self._pending_cb = callback
-        # Trigger a drain.
         try:
             while True:
                 kind, payload = runner.queue.get_nowait()
                 if kind == "result":
-                    if callback:
-                        callback(payload)
-                    else:
-                        # store result if no callback
-                        self._result = payload
+                    cb = self._pending_cb
                     self._pending_cb = None
                     self._runner = None
+                    self._set_busy(False)
+                    if cb:
+                        try:
+                            cb(payload)
+                        except Exception as exc:  # noqa: BLE001 - surface UI-side errors
+                            messagebox.showerror("etabs_extractor", str(exc))
+                            self._set_log(f"Error: {exc}")
                     return
                 elif kind == "error":
-                    self._set_log(f"Error: {payload}")
-                    messagebox.showerror("etabs_extractor", f"{payload}")
                     self._pending_cb = None
                     self._runner = None
+                    self._set_busy(False)
+                    self._set_log(f"Error: {payload}")
+                    messagebox.showerror("etabs_extractor", str(payload))
                     return
                 elif kind == "done":
-                    self._pending_cb = None
-                    self._runner = None
-                    return
-        except Exception:  # noqa: BLE001 - empty queue; keep polling
-            if runner is self._runner:
-                self._poll_id = self.after(80, lambda: self._poll(runner, callback))
+                    continue
+        except queue.Empty:
+            pass
+        self._poll_id = self.after(80, self._poll)
 
-    # ------------------------------------------------------- section helpers
-    def _select_all_sections(self) -> None:
-        self.section_listbox.selection_set(0, "end")
-
-    def _clear_all_sections(self) -> None:
-        self.section_listbox.selection_clear(0, "end")
-
-    # -------------------------------------------------------------- status
-    def _set_log(self, text: str) -> None:
-        self.log_var.set(text)
-
-    def _set_progress(self, fraction: float) -> None:
-        try:
-            self.progress.configure(value=float(fraction))
-        except (TypeError, ValueError, tk.TclError):
-            return
+    def destroy(self) -> None:
+        if self._poll_id is not None:
+            try:
+                self.after_cancel(self._poll_id)
+            except Exception:  # noqa: BLE001 - best-effort cleanup on close
+                pass
+            self._poll_id = None
+        super().destroy()

@@ -1,25 +1,32 @@
-"""Plot-preview widgets for the etabs_extractor GUI.
+"""Embedded plot-preview panels for the etabs_extractor GUI.
 
-Three pieces:
+Three pieces, all embedded directly in the main window's workspace tabs
+(there are no separate pop-up windows):
 
-* :class:`PlotPreviewFrame` — an embedded matplotlib canvas (a
-  ``FigureCanvasTkAgg`` host) for showing one figure.
+* :class:`PlotCanvas` — an embedded matplotlib canvas + navigation toolbar
+  (a ``FigureCanvasTkAgg`` host) for showing one figure, with an empty-state
+  placeholder.  Matplotlib is imported lazily so importing this module never
+  requires it.
 
-* :class:`PlotPreviewWindow` — a separate ``tk.Toplevel`` pop-up that hosts
-  a load dropdown, a ``Preview`` button, a ``Save preview image`` button and
-  a :class:`PlotPreviewFrame` canvas for base-reaction plan views.
+* :class:`BasePreviewPanel` — a load dropdown, Refresh / Save image buttons
+  and a :class:`PlotCanvas` for base-reaction plan views.
 
-* :class:`FramePreviewWindow` — a pop-up with load/section/step/force-type/
-  length dropdowns for beam force diagram previews after frame extraction.
-  Preview always shows the beam with the highest |force| at the selected
-  section + length + load.  "Batch plot all" overlays every beam of that
-  length on one diagram (★ = highest-force beam).
+* :class:`FramePreviewPanel` — load/section/step/force-type/length dropdowns,
+  Refresh / Save image / Batch plot all, and a :class:`PlotCanvas` for beam
+  force diagram previews after frame extraction.  Preview always shows the
+  beam with the highest |force| at the selected section + length + load.
+  "Batch plot all" overlays every beam of that length on one diagram
+  (star = highest-force beam).
 """
 
 from __future__ import annotations
 
+import os
+import sys
+
+import customtkinter as ctk
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -28,315 +35,283 @@ if TYPE_CHECKING:
 _NOTE = "Select a load to preview (or run Extract/Load preview)."
 
 
-class PlotPreviewFrame(tk.Frame):
-    """A frame that hosts an embedded matplotlib canvas (created lazily)."""
+def load_beam_viewer():
+    """Lazily import ``beam_viewer.py`` (repo root, three levels above this
+    file: widgets -> gui -> etabs_extractor -> repo root)."""
+    repo_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..")
+    )
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    import beam_viewer  # noqa: PLC0415
 
-    def __init__(self, master, *, width: int = 720, height: int = 480) -> None:
-        super().__init__(master)
-        self._canvas = None
-        self._size = (width, height)
-        self._empty_label = tk.Label(
-            self, text=_NOTE, fg="gray", width=40, height=10, relief="sunken"
+    return beam_viewer
+
+
+class PlotCanvas(tk.Frame):
+    """An embedded matplotlib figure canvas with a navigation toolbar and an
+    empty-state placeholder.  Matplotlib is only imported when a figure is
+    first shown, so importing this module needs no display/matplotlib.
+
+    Deliberately a **plain ``tk.Frame``, not a ``ctk.CTkFrame``**: every
+    customtkinter widget draws itself on an internal background ``CTkCanvas``
+    (``place()``-managed, covering the widget's full rectangle) that competes
+    for mouse events with any raw Tk widget packed inside it, which broke the
+    matplotlib toolbar's pan/zoom outright when this was a ``CTkFrame``
+    (confirmed empirically — see AGENTS.md). A plain frame has no such
+    machinery. It's fine for this to sit *inside* a ``ctk.CTkFrame`` ancestor
+    (``BasePreviewPanel``/``FramePreviewPanel``) — only this immediate host
+    of the canvas+toolbar must not itself be a ``CTk*`` widget.
+    """
+
+    def __init__(self, master, **kwargs) -> None:
+        super().__init__(master, **kwargs)
+        self._mpl_canvas = None
+        self._toolbar = None
+        self._figure = None
+        self._placeholder = ctk.CTkLabel(
+            self, text=_NOTE, text_color="gray", wraplength=400,
         )
-        self._empty_label.pack(fill="both", expand=True, padx=4, pady=4)
+        self._placeholder.pack(fill="both", expand=True)
+        self.sync_theme()
+
+    def sync_theme(self) -> None:
+        """Match this plain tk.Frame's background to the current ctk
+        appearance mode (it has no automatic theming of its own)."""
+        light, dark = ctk.ThemeManager.theme["CTkFrame"]["fg_color"]
+        color = dark if ctk.get_appearance_mode() == "Dark" else light
+        self.configure(bg=color)
 
     def _ensure_canvas(self):
-        if self._canvas is None:
-            import matplotlib  # noqa: PLC0415
-            matplotlib.use("TkAgg")
-            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg  # noqa: PLC0415
+        if self._mpl_canvas is not None:
+            return self._mpl_canvas
+        import matplotlib
+        matplotlib.use("TkAgg")
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        from matplotlib.backends.backend_tkagg import (
+            NavigationToolbar2Tk,  # type: ignore[reportPrivateImportUsage]
+        )
+        from matplotlib.figure import Figure
 
-            # Placeholder figure to attach the canvas.
-            import matplotlib.pyplot as plt  # noqa: PLC0415
-
-            self._placeholder = plt.figure(figsize=(self._size[0] / 100, self._size[1] / 100))
-            self._canvas = FigureCanvasTkAgg(self._placeholder, master=self)
-            self._empty_label.pack_forget()
-            self._canvas.get_tk_widget().pack(fill="both", expand=True)
-        return self._canvas
+        self._placeholder.pack_forget()
+        fig = Figure()
+        self._mpl_canvas = FigureCanvasTkAgg(fig, master=self)
+        self._toolbar = NavigationToolbar2Tk(self._mpl_canvas, self, pack_toolbar=False)
+        self._toolbar.pack(side="bottom", fill="x")
+        self._mpl_canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
+        return self._mpl_canvas
 
     def set_figure(self, fig) -> None:
-        """Display ``fig`` (a matplotlib Figure) in the canvas."""
+        """Show ``fig`` (a matplotlib Figure), replacing/closing any current one."""
+        import matplotlib.pyplot as plt
+
         canvas = self._ensure_canvas()
-        # Drop the previous figure if it was our placeholder.
-        old = getattr(self, "_current_fig", None)
-        if old is not None and old is not self._placeholder:
-            try:
-                import matplotlib.pyplot as plt  # noqa: PLC0415
-                plt.close(old)
-            except Exception:  # noqa: BLE001 - best-effort cleanup
-                pass
-        self._current_fig = fig
-        try:
-            # Attach the figure to the canvas (bypasses pyright's strict
-            # FigureCanvasTkAgg.figure typing via setattr) and redraw.
-            setattr(canvas, "figure", fig)
-            canvas.draw()
-        except Exception:  # noqa: BLE001 - canvas not ready; fall back to label
-            pass
+        old = self._figure
+        canvas.figure = fig
+        self._figure = fig
+        canvas.draw_idle()
+        if old is not None and old is not fig:
+            plt.close(old)
 
     def clear(self) -> None:
-        """Reset to the empty placeholder."""
-        if self._canvas is not None:
-            try:
-                setattr(self._canvas, "figure", getattr(self, "_placeholder", None))
-                self._canvas.draw()
-            except Exception:  # noqa: BLE001 - best-effort
-                pass
-            self._current_fig = None
+        import matplotlib.pyplot as plt
+
+        if self._figure is not None:
+            plt.close(self._figure)
+            self._figure = None
+        if self._mpl_canvas is not None:
+            self._mpl_canvas.figure.clf()
+            self._mpl_canvas.draw_idle()
+        else:
+            self._placeholder.pack(fill="both", expand=True)
 
     def get_canvas(self):
-        """Return the TkAgg canvas, creating it on first access (may need a
-        display)."""
-        return self._ensure_canvas()
+        return self._mpl_canvas
 
     def current_figure(self):
-        """Return the figure currently displayed (or ``None``)."""
-        return getattr(self, "_current_fig", None)
+        return self._figure
 
 
-class PlotPreviewWindow(tk.Toplevel):
-    """A separate pop-up window hosting the plot preview.
+class BasePreviewPanel(ctk.CTkFrame):
+    """Embedded preview panel for base-reaction plan-view plots.
 
-    Contains a load dropdown, ``Preview`` and ``Save preview image`` buttons,
-    and a :class:`PlotPreviewFrame` canvas.  The window is opened manually via
-    a ``Plot preview`` button in the main window; it is *not* auto-popped
-    after Extract / Load-preview.
-
-    The window receives callbacks from the owning application:
+    Callbacks from the owning application:
 
     * ``settings_provider`` — ``() -> GuiSettings``, used to build figure
       kwargs and read the save dpi/format.
-    * ``figure_builder`` — ``(per_load_df, load_name, settings) ->
-      matplotlib.Figure | None``, the :func:`build_base_reactions_figure`
-      call (kept in the app so this widget stays pure view).
-    * ``on_preview_load`` / ``on_save_preview`` — view-only handlers that
-      render the selected load into the canvas / save the current figure.
+    * ``figure_builder`` — ``(df, load_name, settings) ->
+      matplotlib.Figure | None`` (the :func:`build_base_reactions_figure`
+      call, kept in the app so this widget stays pure view).
     """
 
-    def __init__(
-        self,
-        master,
-        *,
-        settings_provider,
-        figure_builder,
-        log=None,
-        closed=None,
-    ) -> None:
-        super().__init__(master)
-        self.title("Plot preview")
-        self.geometry("720x540")
-        self.minsize(480, 360)
-        # Keep it above the main window but non-modal (manual open/reuse).
-        self.transient(master)
+    def __init__(self, master, *, settings_provider, figure_builder, log=None) -> None:
+        super().__init__(master, fg_color="transparent")
         self._settings_provider = settings_provider
         self._figure_builder = figure_builder
         self._log = log
-        self._closed = closed
-        self._result = None
+        self._result: dict = {}
         self._per_load: dict = {}
         self._current_fig = None
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        top = ttk.Frame(self)
-        top.pack(fill="x", padx=8, pady=6)
-        ttk.Label(top, text="Load:").pack(side="left")
-        self.load_combo = ttk.Combobox(top, state="readonly", width=30)
-        self.load_combo.pack(side="left", padx=6)
-        self.load_combo.bind("<<ComboboxSelected>>", lambda e: self._render_current())
-        ttk.Button(top, text="Preview", command=self._render_current).pack(side="left", padx=4)
-        ttk.Button(top, text="Refresh", command=self._refresh_settings).pack(side="left", padx=4)
-        ttk.Button(top, text="Save preview image", command=self._save_preview).pack(side="left", padx=4)
+        top = ctk.CTkFrame(self, fg_color="transparent")
+        top.pack(fill="x", padx=4, pady=(0, 6))
+        ctk.CTkLabel(top, text="Load:").pack(side="left")
+        self.load_var = ctk.StringVar(value="")
+        self.load_menu = ctk.CTkOptionMenu(
+            top, values=[], variable=self.load_var, width=180,
+            command=lambda _v: self._render_current(),
+        )
+        self.load_menu.pack(side="left", padx=6)
+        ctk.CTkButton(top, text="Refresh", command=self._refresh_settings, width=80).pack(side="left", padx=4)
+        ctk.CTkButton(top, text="Save image...", command=self._save_preview, width=100).pack(side="left", padx=4)
 
-        self.preview = PlotPreviewFrame(self, width=660, height=440)
-        self.preview.pack(fill="both", expand=True, padx=8, pady=8)
+        self.preview = PlotCanvas(self)
+        self.preview.pack(fill="both", expand=True)
 
     # ------------------------------------------------------------------ api
     def set_result(self, result: dict) -> None:
-        """Set the extraction/load result dict, populate the load combo, and
-        auto-render the first load with the current plot settings."""
+        """Set the extraction/load result dict, populate the load dropdown,
+        and auto-render the first load with the current plot settings."""
         self._result = result or {}
         self._per_load = self._result.get("per_load") or {}
         load_names = self._result.get("load_names") or []
-        self.load_combo.configure(values=load_names)
+        self.load_menu.configure(values=load_names)
         if load_names:
-            self.load_combo.current(0)
-            # Apply the current plot appearance immediately instead of leaving
-            # the canvas empty until the user presses Preview/Refresh.
+            self.load_var.set(load_names[0])
             self._render_current()
         else:
+            self.load_var.set("")
             self.preview.clear()
 
     def _refresh_settings(self) -> None:
-        """Re-capture the plot settings from the main window and re-render the
-        currently selected load (the ``settings_provider`` reads the main
-        window's plot widgets fresh on every call)."""
         if self._log:
             self._log("Refreshed preview with current plot settings.")
         self._render_current()
 
-    def is_alive(self) -> bool:
-        """True while the Toplevel still exists on screen."""
-        try:
-            return bool(self.winfo_exists())
-        except tk.TclError:
-            return False
-
     # --------------------------------------------------------------- render
     def _render_current(self) -> None:
-        if not self._per_load:
+        load_name = self.load_var.get()
+        df = self._per_load.get(load_name)
+        if not load_name or df is None:
             return
-        load_name = self.load_combo.get()
-        per_load = self._per_load
-        if not load_name or load_name not in per_load:
-            return
-        settings = self._settings_provider() if self._settings_provider else None
+        settings = self._settings_provider()
         try:
-            fig = self._figure_builder(per_load[load_name], load_name, settings)
-        except ImportError as exc:  # e.g. matplotlib not installed (Windows py)
+            fig = self._figure_builder(df, load_name, settings)
+        except ImportError as exc:
+            msg = f"Preview needs matplotlib: {exc}."
             if self._log:
-                self._log(f"Preview needs matplotlib: {exc}. Install it on the "
-                          f"Windows Python (pip install matplotlib).")
+                self._log(msg)
+            messagebox.showerror("Plot preview", msg)
             return
         except Exception as exc:  # noqa: BLE001
+            msg = f"Preview failed: {exc}"
             if self._log:
-                self._log(f"Preview failed: {exc}")
+                self._log(msg)
+            messagebox.showerror("Plot preview", msg)
             return
         if fig is not None:
             self._current_fig = fig
             self.preview.set_figure(fig)
+            if self._log:
+                self._log(f"Previewing {load_name} ({len(df)} points).")
         else:
             self._current_fig = None
             self.preview.clear()
+            if self._log:
+                self._log(f"No plottable points for {load_name}.")
 
+    # ---------------------------------------------------------------- save
     def _save_preview(self) -> None:
-        """Save the current preview figure at the chosen dpi/format."""
         current = self._current_fig
         if current is None:
             messagebox.showinfo("Save preview", "No preview figure to save.")
             return
-        settings = self._settings_provider() if self._settings_provider else None
-        fmt = getattr(settings, "format", "png") if settings else "png"
-        dpi = getattr(settings, "dpi", 800) if settings else 800
-        default_name = (
-            f"base_{self.load_combo.get() or 'preview'}_preview_{fmt}"
-        )
+        settings = self._settings_provider()
+        load = self.load_var.get() or "preview"
+        default_name = f"base_{load}_plan.{settings.format}"
         path = filedialog.asksaveasfilename(
-            defaultextension=f".{fmt}",
-            filetypes=[(fmt.upper(), f"*.{fmt}")],
+            defaultextension=f".{settings.format}",
+            filetypes=[("PNG", "*.png"), ("PDF", "*.pdf"), ("SVG", "*.svg")],
             initialfile=default_name,
         )
         if not path:
             return
         try:
-            current.savefig(path, dpi=dpi, bbox_inches="tight")
+            current.savefig(path, dpi=settings.dpi, bbox_inches="tight")
             if self._log:
-                self._log(f"Saved preview image: {path}")
+                self._log(f"Saved preview: {path}")
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Save preview", f"Could not save: {exc}")
 
-    # ---------------------------------------------------------------- close
-    def _on_close(self) -> None:
-        """Close the pop-up; the main window stays alive."""
-        try:
-            self.destroy()
-        except tk.TclError:
-            pass
-        if self._closed:
-            self._closed(self)
 
+class FramePreviewPanel(ctk.CTkFrame):
+    """Embedded preview panel for beam force diagrams (frame-extraction mode).
 
-class FramePreviewWindow(tk.Toplevel):
-    """A separate pop-up window hosting beam force diagram previews.
-
-    Used in frame-extraction mode.  Contains load, section, and beam
-    dropdowns plus Preview / Save / Refresh buttons and a
-    :class:`PlotPreviewFrame` canvas.  Manual-open only.
-
-    Unlike :class:`PlotPreviewWindow` (which uses per_load data and
-    ``build_base_reactions_figure``), this window receives the full
+    Unlike :class:`BasePreviewPanel` (which uses per-load data and
+    ``build_base_reactions_figure``), this panel receives the full
     consolidated DataFrame and lets the user pick a load, section, and
-    beam to preview.
+    length to preview; the beam shown is always the one with the highest
+    |force| at that selection.
     """
 
-    def __init__(
-        self,
-        master,
-        *,
-        figure_builder,         # (df, frame, load_name, section, step_type) -> Figure | None
-        batch_figure_builder,   # (df, load_name, section, length_mm, force_col, step_type) -> Figure | None
-        log=None,
-        closed=None,
-    ) -> None:
-        super().__init__(master)
-        self.title("Frame force preview")
-        self.geometry("820x620")
-        self.minsize(600, 440)
-        self.transient(master)
+    def __init__(self, master, *, figure_builder, batch_figure_builder, log=None) -> None:
+        super().__init__(master, fg_color="transparent")
         self._figure_builder = figure_builder
         self._batch_figure_builder = batch_figure_builder
         self._log = log
-        self._closed = closed
-        self._df: pd.DataFrame | None = None
+        self._df: "pd.DataFrame | None" = None
         self._current_fig = None
         self._length_map: dict[str, float] = {}
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # -- Selector row: Load, Section, Step, Force, Length ---------------
-        top = ttk.Frame(self)
-        top.pack(fill="x", padx=8, pady=6)
+        top = ctk.CTkFrame(self, fg_color="transparent")
+        top.pack(fill="x", padx=4, pady=(0, 4))
 
-        ttk.Label(top, text="Load:").pack(side="left")
-        self.load_combo = ttk.Combobox(top, state="readonly", width=18)
-        self.load_combo.pack(side="left", padx=4)
-        self.load_combo.bind("<<ComboboxSelected>>", self._on_selection_change)
+        ctk.CTkLabel(top, text="Load:").pack(side="left")
+        self.load_var = ctk.StringVar(value="")
+        self.load_menu = ctk.CTkOptionMenu(top, values=[], variable=self.load_var, width=110,
+                                           command=lambda _v: self._on_selection_change())
+        self.load_menu.pack(side="left", padx=(4, 8))
 
-        ttk.Label(top, text="Section:").pack(side="left", padx=(8, 0))
-        self.section_combo = ttk.Combobox(top, state="readonly", width=8)
-        self.section_combo.pack(side="left", padx=4)
-        self.section_combo.bind("<<ComboboxSelected>>", self._on_section_change)
+        ctk.CTkLabel(top, text="Section:").pack(side="left")
+        self.section_var = ctk.StringVar(value="")
+        self.section_menu = ctk.CTkOptionMenu(top, values=[], variable=self.section_var, width=80,
+                                              command=lambda _v: self._on_section_change())
+        self.section_menu.pack(side="left", padx=(4, 8))
 
-        ttk.Label(top, text="Step:").pack(side="left", padx=(8, 0))
-        self.step_combo = ttk.Combobox(top, state="readonly", width=7,
-                                       values=("Both", "Max", "Min"))
-        self.step_combo.pack(side="left", padx=4)
-        self.step_combo.current(0)
-        self.step_combo.bind("<<ComboboxSelected>>", self._on_selection_change)
+        ctk.CTkLabel(top, text="Step:").pack(side="left")
+        self.step_var = ctk.StringVar(value="Both")
+        self.step_menu = ctk.CTkOptionMenu(top, values=["Both", "Max", "Min"], variable=self.step_var,
+                                           width=80, command=lambda _v: self._on_selection_change())
+        self.step_menu.pack(side="left", padx=(4, 8))
 
-        ttk.Label(top, text="Force:").pack(side="left", padx=(8, 0))
-        self.force_combo = ttk.Combobox(
-            top, state="readonly", width=10,
-            values=("Moment (M3)", "Shear (V2)", "Axial (P)"),
+        ctk.CTkLabel(top, text="Force:").pack(side="left")
+        self.force_var = ctk.StringVar(value="Moment (M3)")
+        self.force_menu = ctk.CTkOptionMenu(
+            top, values=["Moment (M3)", "Shear (V2)", "Axial (P)"], variable=self.force_var,
+            width=110, command=lambda _v: self._on_selection_change(),
         )
-        self.force_combo.pack(side="left", padx=4)
-        self.force_combo.current(0)
-        self.force_combo.bind("<<ComboboxSelected>>", self._on_selection_change)
+        self.force_menu.pack(side="left", padx=(4, 8))
 
-        ttk.Label(top, text="Length:").pack(side="left", padx=(8, 0))
-        self.length_combo = ttk.Combobox(top, state="readonly", width=9)
-        self.length_combo.pack(side="left", padx=4)
-        self.length_combo.bind("<<ComboboxSelected>>", self._on_selection_change)
+        ctk.CTkLabel(top, text="Length:").pack(side="left")
+        self.length_var = ctk.StringVar(value="")
+        self.length_menu = ctk.CTkOptionMenu(top, values=[], variable=self.length_var, width=90,
+                                             command=lambda _v: self._on_selection_change())
+        self.length_menu.pack(side="left", padx=(4, 0))
 
-        # -- Button row 1: Preview / Refresh / Save -------------------------
-        btn1 = ttk.Frame(self)
-        btn1.pack(fill="x", padx=8, pady=(0, 2))
-        ttk.Button(btn1, text="Preview", command=self._render_current).pack(side="left", padx=4)
-        ttk.Button(btn1, text="Refresh", command=self._refresh_settings).pack(side="left", padx=4)
-        ttk.Button(btn1, text="Save preview image", command=self._save_preview).pack(side="left", padx=4)
-
-        # -- Button row 2: Batch plot all -----------------------------------
-        btn2 = ttk.Frame(self)
-        btn2.pack(fill="x", padx=8, pady=(0, 4))
-        ttk.Button(btn2, text="Batch plot all (overlay)",
-                   command=self._batch_plot).pack(side="left", padx=4)
-        ttk.Label(
-            btn2, text="All beams overlaid in one diagram; ★ = highest |force|",
-            foreground="#777", font=("", 8),
-        ).pack(side="left", padx=4)
+        # -- Button row 1: Refresh / Save -------------------------
+        btn1 = ctk.CTkFrame(self, fg_color="transparent")
+        btn1.pack(fill="x", padx=4, pady=(0, 2))
+        ctk.CTkButton(btn1, text="Refresh", command=self._refresh_settings, width=80).pack(side="left", padx=4)
+        ctk.CTkButton(btn1, text="Save image...", command=self._save_preview, width=100).pack(side="left", padx=4)
+        ctk.CTkButton(btn1, text="Batch plot all (overlay)", command=self._batch_plot, width=170).pack(side="left", padx=4)
+        ctk.CTkLabel(
+            btn1, text="* = highest |force|", text_color="gray",
+        ).pack(side="left", padx=8)
 
         # -- Canvas -----------------------------------------------------------
-        self.preview = PlotPreviewFrame(self, width=720, height=500)
-        self.preview.pack(fill="both", expand=True, padx=8, pady=4)
+        self.preview = PlotCanvas(self)
+        self.preview.pack(fill="both", expand=True)
 
     # ------------------------------------------------------------------ api
     def set_result(self, result: dict) -> None:
@@ -351,69 +326,63 @@ class FramePreviewWindow(tk.Toplevel):
         sections = sorted(df["section"].unique())
         loads = sorted(df["load_name"].unique())
 
-        self.load_combo.configure(values=loads)
-        self.section_combo.configure(values=sections)
+        self.load_menu.configure(values=loads)
+        self.section_menu.configure(values=sections)
 
         if loads:
-            self.load_combo.current(0)
+            self.load_var.set(loads[0])
         if sections:
-            self.section_combo.current(0)
+            self.section_var.set(sections[0])
         self._populate_lengths()
-        if self.length_combo.cget("values"):
-            self.length_combo.current(0)
-
+        lengths = list(self.length_menu.cget("values") or [])
+        if lengths:
+            self.length_var.set(lengths[0])
         self._render_current()
 
     # ---------------------------------------------------------------- helpers
     @property
     def _force_col(self) -> str:
-        label = self.force_combo.get()
+        label = self.force_var.get()
         return {"Moment (M3)": "M3", "Shear (V2)": "V2", "Axial (P)": "P"}.get(label, "M3")
 
-    def _get_highest_frame(self) -> str | None:
+    def _get_highest_frame(self) -> "int | str | None":
         """Return the frame with the highest |force_col| at the current
         selection, or None if no data."""
-        section = self.section_combo.get()
-        length_label = self.length_combo.get()
-        load_name = self.load_combo.get()
+        section = self.section_var.get()
+        length_label = self.length_var.get()
+        load_name = self.load_var.get()
         if not section or not length_label or not load_name or self._df is None:
             return None
         length_mm = self._length_map.get(length_label, 0)
-        import sys as _sys, os as _os
-        _repo = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
-        if _repo not in _sys.path:
-            _sys.path.insert(0, _repo)
-        from beam_viewer import find_highest_force_frame  # noqa: PLC0415
-        return find_highest_force_frame(
+        bv = load_beam_viewer()
+        return bv.find_highest_force_frame(
             self._df, section, load_name,
             force_col=self._force_col, length_mm=length_mm,
         )
 
     def _populate_lengths(self) -> None:
         """Fill the length dropdown from the selected section."""
-        section = self.section_combo.get()
+        section = self.section_var.get()
         if not section or self._df is None:
-            self.length_combo.configure(values=[])
+            self.length_menu.configure(values=[])
             return
-        import sys as _sys, os as _os
-        _repo = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
-        if _repo not in _sys.path:
-            _sys.path.insert(0, _repo)
-        from beam_viewer import get_lengths_for_section  # noqa: PLC0415
-        lengths = get_lengths_for_section(self._df, section)
-        labels = [f"{l/1000:.2f}m" for l in lengths]
+        bv = load_beam_viewer()
+        lengths = bv.get_lengths_for_section(self._df, section)
+        lf = bv._length_scale(bv._data_units(self._df))
+        labels = [f"{l * lf:.2f}m" for l in lengths]
         self._length_map = dict(zip(labels, lengths))
-        self.length_combo.configure(values=labels)
+        self.length_menu.configure(values=labels)
 
     # ------------------------------------------------------------ callbacks
-    def _on_section_change(self, _event=None) -> None:
+    def _on_section_change(self) -> None:
         self._populate_lengths()
-        if self.length_combo.cget("values"):
-            self.length_combo.current(0)
+        lengths = list(self.length_menu.cget("values") or [])
+        if lengths:
+            self.length_var.set(lengths[0])
         self._render_current()
 
-    def _on_selection_change(self, _event=None) -> None:
-        """Auto-render on any dropdown change (load, step, force, length)."""
+    def _on_selection_change(self) -> None:
+        """Re-render on any dropdown change (load, step, force, length)."""
         self._render_current()
 
     def _refresh_settings(self) -> None:
@@ -421,25 +390,25 @@ class FramePreviewWindow(tk.Toplevel):
             self._log("Refreshed frame preview.")
         self._render_current()
 
-    def is_alive(self) -> bool:
-        try:
-            return bool(self.winfo_exists())
-        except tk.TclError:
-            return False
-
     # --------------------------------------------------------------- render
     def _render_current(self) -> None:
         if self._df is None or self._df.empty:
             return
-        load_name = self.load_combo.get()
-        section = self.section_combo.get()
-        step_val = self.step_combo.get()
+        load_name = self.load_var.get()
+        section = self.section_var.get()
+        step_val = self.step_var.get()
         if not load_name or not section:
             return
         step_type = None if step_val == "Both" else step_val
 
-        # Auto-find the highest-force beam
-        frame_val = self._get_highest_frame()
+        try:
+            frame_val = self._get_highest_frame()
+        except ImportError as exc:
+            msg = f"Preview needs matplotlib: {exc}."
+            if self._log:
+                self._log(msg)
+            messagebox.showerror("Frame preview", msg)
+            return
         if frame_val is None:
             if self._log:
                 self._log(f"No data for {section} / {load_name}")
@@ -464,7 +433,7 @@ class FramePreviewWindow(tk.Toplevel):
             self._current_fig = fig
             self.preview.set_figure(fig)
             if self._log:
-                self._log(f"Beam {frame_val} (highest |{self._force_col}|) — {section} {load_name}")
+                self._log(f"Beam {frame_val} (highest |{self._force_col}|) - {section} {load_name}")
         else:
             self._current_fig = None
             self.preview.clear()
@@ -475,9 +444,9 @@ class FramePreviewWindow(tk.Toplevel):
         if current is None:
             messagebox.showinfo("Save preview", "No preview figure to save.")
             return
-        load = self.load_combo.get() or "preview"
-        sec = self.section_combo.get() or "X"
-        step = self.step_combo.get() or "X"
+        load = self.load_var.get() or "preview"
+        sec = self.section_var.get() or "X"
+        step = self.step_var.get() or "X"
         default_name = f"frame_{sec}_{load}_{step}_diagram.png"
         path = filedialog.asksaveasfilename(
             defaultextension=".png",
@@ -486,11 +455,10 @@ class FramePreviewWindow(tk.Toplevel):
         )
         if not path:
             return
-        import os  # noqa: PLC0415
-        _ext = os.path.splitext(path)[1].lower()
-        _fmt = _ext.lstrip(".") if _ext else "png"
+        ext = os.path.splitext(path)[1].lower()
+        fmt = ext.lstrip(".") if ext else "png"
         try:
-            current.savefig(path, dpi=150, bbox_inches="tight", format=_fmt)
+            current.savefig(path, dpi=150, bbox_inches="tight", format=fmt)
             if self._log:
                 self._log(f"Saved frame preview: {path}")
         except Exception as exc:  # noqa: BLE001
@@ -498,10 +466,10 @@ class FramePreviewWindow(tk.Toplevel):
 
     def _batch_plot(self) -> None:
         """Render overlay of all beams at the selected section + length."""
-        section = self.section_combo.get()
-        length_label = self.length_combo.get()
-        load_name = self.load_combo.get()
-        step_val = self.step_combo.get()
+        section = self.section_var.get()
+        length_label = self.length_var.get()
+        load_name = self.load_var.get()
+        step_val = self.step_var.get()
         if not section or not length_label or not load_name or self._df is None:
             return
         length_mm = self._length_map.get(length_label, 0)
@@ -534,12 +502,3 @@ class FramePreviewWindow(tk.Toplevel):
             self.preview.clear()
             if self._log:
                 self._log("Batch plot produced no data.")
-
-    # ---------------------------------------------------------------- close
-    def _on_close(self) -> None:
-        try:
-            self.destroy()
-        except tk.TclError:
-            pass
-        if self._closed:
-            self._closed(self)

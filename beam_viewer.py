@@ -23,8 +23,16 @@ import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 import numpy as np
 import pandas as pd
+
+from etabs_extractor.units import LEGACY_FRAME, LENGTH_TO_M, UnitSystem
+from etabs_extractor.units import factors as _unit_factors
+
+# Fixed display units for this viewer (unchanged UX regardless of the
+# source CSV's own units — kN / kN·m / m, human-readable for a beam diagram).
+_DISPLAY_UNITS = UnitSystem("kN", "m")
 
 # ── Force components to display ──────────────────────────────────────────
 # (label, column, unit)
@@ -74,32 +82,36 @@ def get_beam_max_force(
 
 
 def get_lengths_for_section(df: pd.DataFrame, section: str) -> list[float]:
-    """Return sorted unique beam lengths (mm) for a given section.
+    """Return sorted unique beam lengths (in the CSV's own ``length_unit``,
+    e.g. mm) for a given section.
 
-    Lengths are rounded to 1 mm precision to group floating-point
-    noise from the COM extraction (e.g. 4099.999999998 → 4100.0).
+    Lengths are rounded to a ~1mm-equivalent precision (see
+    :func:`_length_tol`) to group floating-point noise from the COM
+    extraction (e.g. 4099.999999998 → 4100.0).
     """
     sub = df[df["section"] == section]
     if "length_mm" not in sub.columns:
         return []
+    tol = _length_tol(sub)
     lengths = sub["length_mm"].dropna().unique()
-    # Round to 1 mm, then deduplicate
-    rounded = sorted({round(l) for l in lengths})
+    rounded = sorted({_round_to_tol(l, tol) for l in lengths})
     return rounded
 
 
 def get_frames_for_length(
     df: pd.DataFrame, section: str, length_mm: float
 ) -> list[int]:
-    """Return sorted frame numbers with a given section and length.
+    """Return sorted frame numbers with a given section and length
+    (``length_mm`` in the CSV's own ``length_unit``, e.g. mm).
 
-    Lengths are matched within 1 mm tolerance to handle floating-point
-    noise from the COM extraction.
+    Lengths are matched within a ~1mm-equivalent tolerance (see
+    :func:`_length_tol`) to handle floating-point noise from the COM
+    extraction.
     """
     sub = df[df["section"] == section]
     if "length_mm" not in sub.columns:
         return []
-    tol = 1.0  # mm
+    tol = _length_tol(sub)
     mask = sub["length_mm"].notna() & (sub["length_mm"].sub(length_mm).abs() <= tol)
     frames = sub.loc[mask, "frame"].unique()
     return sorted(frames)
@@ -158,12 +170,57 @@ def get_beam_step_types(
     return list(get_force_groups(beam_data).keys())
 
 
-def _scale_force(val: float, col: str) -> float:
-    """Convert force values: N → kN, N·mm → kN·m for display."""
+def _data_units(df: pd.DataFrame) -> UnitSystem:
+    """Return ``df``'s own unit system from its ``force_unit``/``length_unit``
+    columns.
+
+    Falls back to :data:`etabs_extractor.units.LEGACY_FRAME` (N, mm) for a
+    CSV written before unit-awareness (no such columns, or all-empty) — this
+    viewer's historical hardcoded assumption.
+    """
+    try:
+        if "force_unit" in df.columns and "length_unit" in df.columns:
+            force = str(df["force_unit"].dropna().iloc[0])
+            length = str(df["length_unit"].dropna().iloc[0])
+            if force and length:
+                return UnitSystem(force, length)
+    except (IndexError, KeyError):
+        pass
+    return LEGACY_FRAME
+
+
+def _length_scale(src: UnitSystem) -> float:
+    """Return the factor converting a length value from ``src`` units to
+    metres (this viewer's fixed display length unit)."""
+    _ff, _mf, lf = _unit_factors(src, _DISPLAY_UNITS)
+    return lf
+
+
+def _length_tol(df: pd.DataFrame) -> float:
+    """Return a ~1mm-equivalent length-matching tolerance in ``df``'s own
+    length unit (1.0 for a legacy mm CSV, matching the historical hardcoded
+    tolerance)."""
+    src = _data_units(df)
+    return 0.001 / LENGTH_TO_M[src.length]
+
+
+def _round_to_tol(value: float, tol: float) -> float:
+    """Round ``value`` to the nearest multiple of ``tol`` (groups
+    floating-point noise from the COM extraction, e.g. 4099.999999998 with
+    ``tol=1.0`` → 4100.0)."""
+    if tol <= 0:
+        return value
+    return round(round(value / tol) * tol, 9)
+
+
+def _scale_force(val: float, col: str, src: UnitSystem = LEGACY_FRAME) -> float:
+    """Convert a force/moment value from ``src`` units to the fixed display
+    units (kN / kN·m)."""
+    force_factor, moment_factor, _length_factor = _unit_factors(src, _DISPLAY_UNITS)
     if col in ("P", "V2", "V3"):
-        return val / 1000.0
+        return val * force_factor
     if col in ("M2", "M3", "T"):
-        return val / 1e6
+        return val * moment_factor
     return val
 
 
@@ -210,13 +267,15 @@ def plot_beam_diagrams(
     BELOW the zero line, matching structural engineering convention.
     """
     groups = get_force_groups(beam_data)
+    src = _data_units(beam_data)
+    lf = _length_scale(src)
 
-    length_mm = (
+    length_native = (
         beam_data["length_mm"].iloc[0]
         if "length_mm" in beam_data.columns
         else beam_data["station"].max()
     )
-    length_m = length_mm / 1000.0 if length_mm else 0.0
+    length_m = length_native * lf if length_native else 0.0
 
     is_envelope = len(groups) > 1
 
@@ -232,14 +291,14 @@ def plot_beam_diagrams(
         all_s = np.array([])
 
         def _make_vals(grp):
-            raw = np.array([_scale_force(v, col) for v in grp[col].values])
+            raw = np.array([_scale_force(v, col, src) for v in grp[col].values])
             return _diagram_vals(raw, col)
 
         if is_envelope and step_type:
             # Single step: plot only the requested step
             if step_type in groups:
                 grp = groups[step_type]
-                stations_m = grp["station"].values / 1000.0
+                stations_m = grp["station"].values * lf
                 vals = _make_vals(grp)
                 all_s, all_v = stations_m, vals
                 ax.plot(stations_m, vals, color="blue", linewidth=2.0,
@@ -261,7 +320,7 @@ def plot_beam_diagrams(
                 if step_key not in groups:
                     continue
                 grp = groups[step_key]
-                stations_m = grp["station"].values / 1000.0
+                stations_m = grp["station"].values * lf
                 vals = _make_vals(grp)
                 if len(vals) == 0:
                     continue
@@ -280,7 +339,7 @@ def plot_beam_diagrams(
         else:
             # Single step: one clean blue line
             grp = next(iter(groups.values()))
-            stations_m = grp["station"].values / 1000.0
+            stations_m = grp["station"].values * lf
             vals = _make_vals(grp)
             all_s, all_v = stations_m, vals
             ax.plot(stations_m, vals, color="blue", linewidth=2.0,
@@ -362,7 +421,13 @@ def build_frame_figure(
     if beam_data is None or beam_data.empty:
         return None
     sec_name = section or beam_data["section"].iloc[0]
-    fig, axs = plt.subplots(3, 1, figsize=figsize, sharex=True)
+    # Figure(...) + fig.subplots(...), NOT pyplot.subplots(): pyplot's
+    # stateful figure-manager registry can leave an orphaned figure
+    # manager/canvas alive after the GUI preview re-parents the figure onto
+    # its own FigureCanvasTkAgg, which broke the embedded preview's toolbar
+    # pan/zoom (see AGENTS.md). This function feeds that embedded preview.
+    fig = Figure(figsize=figsize)
+    axs = fig.subplots(3, 1, sharex=True)
     fig.subplots_adjust(hspace=0.35, left=0.08, right=0.95, top=0.94, bottom=0.06)
     plot_beam_diagrams(beam_data, frame, load_name, sec_name, axs, step_type=step_type)
     return fig
@@ -382,7 +447,7 @@ def find_highest_force_frame(
     """
     sub = df[df["section"] == section]
     if length_mm is not None and "length_mm" in sub.columns:
-        tol = 1.0
+        tol = _length_tol(sub)
         sub = sub[sub["length_mm"].notna() & (sub["length_mm"].sub(length_mm).abs() <= tol)]
     sub = sub[sub["load_name"] == load_name]
     if sub.empty:
@@ -416,6 +481,8 @@ def build_batch_frame_figure(
     frames = get_frames_for_length(df, section, length_mm)
     if not frames:
         return None
+    src = _data_units(df)
+    lf = _length_scale(src)
 
     # Score each frame by peak |force_col|
     scored: list[tuple[int | str, float]] = []
@@ -440,10 +507,14 @@ def build_batch_frame_figure(
         "#c49c94", "#f7b6d2", "#c7c7c7", "#dbdb8d", "#9edae5",
     ]
 
-    fig, axs = plt.subplots(3, 1, figsize=figsize, sharex=True)
+    # Figure(...) + fig.subplots(...), NOT pyplot.subplots() — see the note
+    # in build_frame_figure() above; this function feeds the same embedded
+    # GUI preview (batch overlay).
+    fig = Figure(figsize=figsize)
+    axs = fig.subplots(3, 1, sharex=True)
     fig.subplots_adjust(hspace=0.35, left=0.06, right=0.97, top=0.94, bottom=0.06)
     fig.suptitle(
-        f"Section: {section} | L={length_mm/1000:.2f}m | Load: {load_name}"
+        f"Section: {section} | L={length_mm * lf:.2f}m | Load: {load_name}"
         f"{' | Step: ' + step_type if step_type else ''}"
         f" | {len(scored)} beam(s)   ★ = highest |{force_col}|",
         fontsize=11, fontweight="bold",
@@ -479,10 +550,10 @@ def build_batch_frame_figure(
         else:
             grp = next(iter(groups.values()))
 
-        stations_m = grp["station"].values / 1000.0
+        stations_m = grp["station"].values * lf
 
         for ax, fcol in zip(axs, force_cols):
-            raw = np.array([_scale_force(v, fcol) for v in grp[fcol].values])
+            raw = np.array([_scale_force(v, fcol, src) for v in grp[fcol].values])
             vals = _diagram_vals(raw, fcol)
             ax.plot(stations_m, vals, color=color, linewidth=lw,
                     alpha=alpha, zorder=zorder, label=label)

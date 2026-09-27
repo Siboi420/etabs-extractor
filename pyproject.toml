@@ -12,6 +12,7 @@ license = { text = "MIT" }
 dependencies = [
     "comtypes>=1.1.11",
     "pandas>=1.5",
+    "customtkinter>=5.2.0",
     # plotting (lazy-imported in plots.py so the pure core stays importable
     # even without matplotlib); >=3.9.3 matches pandas 3.0.5's plot extra.
     "matplotlib>=3.9.3",

@@ -278,6 +278,9 @@ def test_service_frame_mode_kwargs():
     # No base-only kwargs in frame mode.
     assert "elevation" not in kw
     assert "only_loaded" not in kw
+    # Unit kwargs default to "model" and thread through in frame mode too.
+    assert kw["force_unit"] == "model"
+    assert kw["length_unit"] == "model"
     # Empty sections/frames -> None (no filter).
     s2 = GuiSettings(extract_mode="frame")
     kw2 = service.build_extract_kwargs(s2)
@@ -344,6 +347,8 @@ def test_service_extract_kwargs_mapping():
         only_loaded=True,
         run_analysis=False,
         attach=True,
+        force_unit="kN",
+        length_unit="m",
     )
     kw = service.build_extract_kwargs(s)
     assert kw["model_path"] == "/mnt/d/models/x.EDB"
@@ -355,11 +360,15 @@ def test_service_extract_kwargs_mapping():
     assert kw["attach"] is True
     assert kw["launch"] is False
     assert kw["tag"] == "KM13"
+    assert kw["force_unit"] == "kN"
+    assert kw["length_unit"] == "m"
     # Empty selection -> both None (all model combos default).
     s2 = GuiSettings()
     kw2 = service.build_extract_kwargs(s2)
     assert kw2["combos"] is None
     assert kw2["cases"] is None
+    assert kw2["force_unit"] == "model"
+    assert kw2["length_unit"] == "model"
     print("service.build_extract_kwargs OK")
 
 
@@ -439,6 +448,11 @@ def test_state_parsing():
     assert parse_combos("A B, C") == ["A B", "C"]
     assert parse_elevation("") is None
     assert parse_elevation("-16000") == -16000.0
+    # The elevation combobox's labelled entries (see app._refresh_elevation_
+    # choices) must still parse: leading numeric token, trailing "(...)"
+    # label ignored.
+    assert parse_elevation("-18.55  (Base, 42 pts)") == -18.55
+    assert parse_elevation("1900  (+ 1.90, 60 pts)") == 1900.0
     try:
         parse_elevation("not-a-number")
         assert False, "expected ValueError"
@@ -475,6 +489,46 @@ def test_plot_single_step_stem_and_title():
         assert paths[0].name == "base_ASD_1_plan_min.png", paths[0].name
         assert paths[0].exists() and paths[0].stat().st_size > 0, paths[0]
     print("plot single-step stem/title OK")
+
+
+def test_build_elevation_labels():
+    """service.build_elevation_labels formats a model's elevation inventory
+    (model length units) into combobox labels in the requested output unit."""
+    elevations = [
+        {"z": -18550.0, "label": "Base", "n_points": 42},
+        {"z": 1900.0, "label": "+ 1.90", "n_points": 60},
+        {"z": 2300.0, "label": "", "n_points": 5},
+    ]
+    # "model"/"" -> no conversion (labels stay in the model's own unit, mm).
+    labels_model = service.build_elevation_labels(elevations, "mm", "model")
+    assert labels_model[0] == "-18550  (Base, 42 pts)", labels_model
+    assert labels_model[2] == "2300  (5 pts)", labels_model
+    # Explicit "m" -> mm -> m conversion (÷1000).
+    labels_m = service.build_elevation_labels(elevations, "mm", "m")
+    assert labels_m[0] == "-18.55  (Base, 42 pts)", labels_m
+    assert labels_m[1] == "1.9  (+ 1.90, 60 pts)", labels_m
+    print("service.build_elevation_labels OK")
+
+
+def test_units_module_factors():
+    """etabs_extractor.units: resolve_target + factors sanity (model-aware
+    unit conversion at the heart of the extraction/plotting pipeline)."""
+    from etabs_extractor.units import UnitSystem, factors, resolve_target
+
+    src = UnitSystem("N", "mm")
+    # "model" on both dimensions -> no conversion.
+    same = resolve_target(src, "model", "model")
+    assert same == src
+    ff, mf, lf = factors(src, same)
+    assert ff == 1.0 and mf == 1.0 and lf == 1.0
+
+    dst = resolve_target(src, "kN", "m")
+    assert dst == UnitSystem("kN", "m")
+    ff, mf, lf = factors(src, dst)
+    assert abs(ff - 0.001) < 1e-12   # N -> kN
+    assert abs(lf - 0.001) < 1e-12   # mm -> m
+    assert abs(mf - 1e-6) < 1e-15    # N*mm -> kN*m
+    print("units module factors OK")
 
 
 def test_write_base_step_csv():
@@ -519,11 +573,16 @@ def run():
     test_plot_base_reactions_dpi_figsize()
     test_plot_single_step_stem_and_title()
     test_write_base_step_csv()
+    test_service_frame_mode_kwargs()
     test_service_extract_kwargs_mapping()
     test_load_selection_model()
+    test_load_selection_model_kind_groups()
     test_inspect_active_model_fake()
+    test_inspect_active_model_fake2()
     test_service_plot_kwargs_mapping()
     test_state_parsing()
+    test_build_elevation_labels()
+    test_units_module_factors()
     print("PASSED")
 
 

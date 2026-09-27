@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from matplotlib.figure import Figure
 
 from .io import _append_tag, _sanitize_filename
+from .units import FORCE_TO_N, LEGACY_BASE, LENGTH_TO_M, UnitSystem
+from .units import factors as _unit_factors
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +47,11 @@ COMPONENT_COLUMNS: dict[str, str] = {
     "M3": "M3",
 }
 
-# Friendly component name -> display unit (base reactions are exported in
-# kN / kN·m, so these are the default display units; no further conversion).
+# Friendly component name -> display unit.  Historical/reference labels only
+# (base reactions used to be hardcoded to kN/kN·m); the *actual* display unit
+# for a given plot is resolved dynamically by :func:`_resolve_units` from the
+# DataFrame's own ``force_unit``/``length_unit`` columns (or a named preset),
+# not from this constant.
 COMPONENT_UNITS: dict[str, str] = {
     "Fx": "kN",
     "Fy": "kN",
@@ -56,36 +61,23 @@ COMPONENT_UNITS: dict[str, str] = {
     "M3": "kN·m",
 }
 
-# Supported unit systems.  Each carries the display units and the divisor used
-# to convert the already-exported base-reaction values (kN for forces, kN·m
-# for moments, mm for coordinates) into the display units.
-#   force_scale:  kN     -> target force unit   (divisor)
-#   moment_scale: kN·m   -> target moment unit  (divisor)
-#   length_scale: mm     -> target length unit  (divisor)
-# Force/moment scaling is identity (1.0) in both systems — the values are
-# already exported as kN / kN·m — so only length_scale (mm -> m) differs.
-UNITS: dict[str, dict[str, object]] = {
-    # Exported units (default): kN / kN·m / mm, no further conversion.
-    "model": {
-        "force": "kN",
-        "moment": "kN·m",
-        "length": "mm",
-        "force_scale": 1.0,
-        "moment_scale": 1.0,
-        "length_scale": 1.0,
-    },
-    # kN / m: forces/moments already kN/kN·m (unchanged), coords mm->m (÷1000).
-    "kN-m": {
-        "force": "kN",
-        "moment": "kN·m",
-        "length": "m",
-        "force_scale": 1.0,
-        "moment_scale": 1.0,
-        "length_scale": 1000.0,
-    },
+# Named display-unit presets: a target (force, length) pair. ``"model"`` and
+# ``"data"`` are handled specially by :func:`_resolve_units` (they mean "use
+# the DataFrame's own units, no conversion") and are not listed here. Any
+# other ``"<force>-<length>"`` string (e.g. ``"tonf-m"``) is also accepted —
+# see :func:`_resolve_units`.
+UNITS: dict[str, dict[str, str]] = {
+    "kN-m": {"force": "kN", "length": "m"},
+    "kN-mm": {"force": "kN", "length": "mm"},
+    "N-mm": {"force": "N", "length": "mm"},
+    "tonf-m": {"force": "tonf", "length": "m"},
+    "kgf-m": {"force": "kgf", "length": "m"},
 }
 
-DEFAULT_UNITS = "model"
+# Default: display in whatever units the data already carries (the
+# DataFrame's own ``force_unit``/``length_unit`` columns; no conversion).
+# ``"model"`` is accepted as a synonym (kept for CLI/back-compat).
+DEFAULT_UNITS = "data"
 
 _REQUIRED_DATAFRAME_COLUMNS = ("x", "y", "load_name")
 
@@ -130,11 +122,12 @@ def plot_base_reactions(
     :param fmt: image format (e.g. ``png``, ``pdf``, ``svg``).
     :param title: override the figure title.  When ``None``, the title is the
         ``load_name`` (plus ``z = <value> mm`` when every point shares one ``z``).
-    :param units: unit system for display — ``"model"`` (default; kN, kN·m, mm)
-        or ``"kN-m"`` (kN, kN·m, m — coordinates mm→m).  Base reactions are
-        already exported in kN/kN·m, so forces/moments are not rescaled; only
-        the coordinate length unit differs between the two systems.  Keys must
-        exist in :data:`UNITS`.
+    :param units: unit system for display — ``"data"``/``"model"`` (default;
+        display in whatever units ``df`` itself carries, read from its
+        ``force_unit``/``length_unit`` columns — no conversion), a named
+        preset from :data:`UNITS` (e.g. ``"kN-m"``), or any other
+        ``"<force>-<length>"`` string (e.g. ``"tonf-mm"``). See
+        :func:`_resolve_units`.
     :param label_fontsize: font size (points) for each point's annotation
         label.  Defaults to ``2.4`` (about 0.2\u00d7 the previous "small" ~10pt
         labels) for a compact figure.
@@ -160,7 +153,7 @@ def plot_base_reactions(
 
     comps = tuple(components) if components is not None else DEFAULT_COMPONENTS
     _validate_components(comps)
-    units_def = _resolve_units(units)
+    units_def = _resolve_units(units, df)
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -283,7 +276,8 @@ def build_base_reactions_figure(
         :data:`DEFAULT_COMPONENTS`).
     :param title: override the figure title; ``None`` derives it from the load
         name (plus a shared ``z`` when every point shares one).
-    :param units: unit system for display (``"model"`` or ``"kN-m"``).
+    :param units: unit system for display; see :func:`_resolve_units`
+        (``"data"``/``"model"`` displays ``df``'s own units unconverted).
     :param label_fontsize: annotation font size (points).
     :param dynamic_size: when True, size the figure from the data extent;
         otherwise use the fixed ``figsize`` (inches).
@@ -297,12 +291,11 @@ def build_base_reactions_figure(
     :param y_offset: edge-label padding (inches): extra room added to the y
         axis limits on each side.  Default ``1.0``.
     """
-    import matplotlib  # noqa: PLC0415
-    import matplotlib.pyplot as plt  # noqa: PLC0415
+    from matplotlib.figure import Figure  # noqa: PLC0415
 
     comps = tuple(components) if components is not None else DEFAULT_COMPONENTS
     _validate_components(comps)
-    units_def = _resolve_units(units)
+    units_def = _resolve_units(units, df)
 
     # Skip points with unresolved coordinates; never crash.  (x/y come from
     # the DataFrame where unresolvable coords were kept as NaN.)
@@ -322,7 +315,13 @@ def build_base_reactions_figure(
     base_size = (_dynamic_figsize(valid, len_scale) if dynamic_size
                  else (figsize or (10, 8)))
     # The canvas is exactly the base size — offsets never inflate it.
-    fig, ax = plt.subplots(figsize=base_size)
+    # Built via Figure() directly, NOT pyplot.subplots(): pyplot's stateful
+    # figure-manager registry can leave an orphaned figure manager/canvas
+    # alive after the GUI preview re-parents the figure onto its own
+    # FigureCanvasTkAgg, which was found (empirically) to break the
+    # embedded preview's toolbar pan/zoom — see AGENTS.md.
+    fig = Figure(figsize=base_size)
+    ax = fig.add_subplot(111)
 
     ax.scatter(valid["x"] / len_scale, valid["y"] / len_scale,
                s=20, color="tab:blue", zorder=3)
@@ -644,19 +643,75 @@ def _fmt_plain(value: float) -> str:
         return str(value)
 
 
-def _resolve_units(units: str | dict) -> dict:
-    """Return the unit system dict for ``units``.
+def _source_unit_system(df) -> "UnitSystem":
+    """Return the DataFrame's own unit system from its ``force_unit`` /
+    ``length_unit`` columns.
 
-    Accepts either a unit-system name (``"model"`` / ``"kN-m"``, validated
-    against :data:`UNITS`) or an already-resolved unit dict (pass-through).
+    Falls back to :data:`etabs_extractor.units.LEGACY_BASE` (kN, mm — the
+    unit system this package used to hardcode for base reactions) for a CSV
+    written before unit-awareness (no such columns, or all-empty).
+    """
+    try:
+        cols = getattr(df, "columns", [])
+        if "force_unit" in cols and "length_unit" in cols:
+            force = str(df["force_unit"].dropna().iloc[0])
+            length = str(df["length_unit"].dropna().iloc[0])
+            if force and length:
+                return UnitSystem(force, length)
+    except (IndexError, KeyError, AttributeError):
+        pass
+    return LEGACY_BASE
+
+
+def _resolve_units(units: str | dict, df=None) -> dict:
+    """Return the unit system dict for ``units`` against the source data.
+
+    ``units`` may be:
+
+    * an already-resolved unit dict (pass-through, e.g. from a previous
+      :func:`_resolve_units` call or the GUI);
+    * ``"model"`` / ``"data"`` — display in ``df``'s own units (no
+      conversion);
+    * a named preset from :data:`UNITS` (e.g. ``"kN-m"``);
+    * any other ``"<force>-<length>"`` string (e.g. ``"tonf-mm"``), where
+      ``force``/``length`` are keys of :data:`etabs_extractor.units.FORCE_TO_N`
+      / :data:`etabs_extractor.units.LENGTH_TO_M`.
+
+    The source unit system is read from ``df`` (see
+    :func:`_source_unit_system`); scale factors convert *from* that source
+    *to* the requested target (``_scale`` divides the source value by them).
     """
     if isinstance(units, dict):
         return units
-    if units not in UNITS:
-        raise ValueError(
-            f"Unknown unit system {units!r}. Known: {', '.join(UNITS)}."
-        )
-    return UNITS[units]
+
+    src = _source_unit_system(df)
+    if units in ("model", "data"):
+        dst = src
+    elif units in UNITS:
+        preset = UNITS[units]
+        dst = UnitSystem(str(preset["force"]), str(preset["length"]))
+    else:
+        parts = str(units).split("-", 1)
+        if len(parts) == 2 and parts[0] in FORCE_TO_N and parts[1] in LENGTH_TO_M:
+            dst = UnitSystem(parts[0], parts[1])
+        else:
+            raise ValueError(
+                f"Unknown unit system {units!r}. Known: model, data, "
+                f"{', '.join(UNITS)}, or '<force>-<length>' (e.g. 'tonf-m')."
+            )
+
+    force_factor, moment_factor, length_factor = _unit_factors(src, dst)
+    # `_scale()` divides the source value by the scale to get the display
+    # value; `_unit_factors()` gives a multiplier (value_dst = value_src *
+    # factor), so the scale here is its reciprocal.
+    return {
+        "force": dst.force,
+        "moment": dst.moment,
+        "length": dst.length,
+        "force_scale": (1.0 / force_factor) if force_factor else 1.0,
+        "moment_scale": (1.0 / moment_factor) if moment_factor else 1.0,
+        "length_scale": (1.0 / length_factor) if length_factor else 1.0,
+    }
 
 
 def _scale(units_def: dict, key: str) -> float:

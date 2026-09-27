@@ -15,6 +15,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+from . import units as _units
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -77,8 +79,28 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="For --extract base: only report points whose z-elevation equals "
-        "this value (model length units, e.g. -16000). Point name filter is "
-        "applied first.",
+        "this value, in the OUTPUT length unit (--length-unit; e.g. -16000 for "
+        "a model reported in mm, or -16.0 if --length-unit m). Point name "
+        "filter is applied first. Use --list-only to see the model's actual "
+        "elevations.",
+    )
+    parser.add_argument(
+        "--force-unit",
+        default="model",
+        metavar="UNIT",
+        choices=list(_units.FORCE_CHOICES),
+        help="Output force/moment unit (default: 'model' — the active "
+        "model's own present units, read live via the COM API; no "
+        "conversion). Choices: " + ", ".join(_units.FORCE_CHOICES) + ".",
+    )
+    parser.add_argument(
+        "--length-unit",
+        default="model",
+        metavar="UNIT",
+        choices=list(_units.LENGTH_CHOICES),
+        help="Output length unit for coordinates/station/length columns "
+        "(default: 'model' — the active model's own present units; no "
+        "conversion). Choices: " + ", ".join(_units.LENGTH_CHOICES) + ".",
     )
     parser.add_argument(
         "--only-loaded",
@@ -132,12 +154,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--units",
         default="model",
         metavar="UNIT",
-        choices=["model", "kN-m"],
-        help="Unit system for plot display: 'model' (default; kN, kN·m, mm) "
-        "or 'kN-m' (kN, kN·m, m; coordinates mm→m). Base reactions are "
-        "already exported in kN/kN·m, so forces/moments are not rescaled; "
-        "only the coordinate length unit differs. "
-        "Applies to --plot and --plot-csv.",
+        help="Unit system for plot display: 'model'/'data' (default; display "
+        "the CSV/DataFrame's own units unconverted — the units the "
+        "extraction was run with, read from its force_unit/length_unit "
+        "columns), a named preset (kN-m, kN-mm, N-mm, tonf-m, kgf-m), or any "
+        "'<force>-<length>' pair (e.g. tonf-mm). Applies to --plot and "
+        "--plot-csv.",
     )
     parser.add_argument(
         "--tag",
@@ -206,6 +228,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Point objs : {len(info.get('point_names', []))}")
         print(f"Combos     : {len(info['combos'])} -> {', '.join(info['combos'])}")
         print(f"Load cases : {len(info['cases'])} -> {', '.join(info['cases'])}")
+        units = info.get("units") or {}
+        if units.get("force") and units.get("length"):
+            print(f"Units      : {units['force']}, {units['length']}")
+        elevations = info.get("elevations") or []
+        if elevations:
+            print(f"Elevations : {len(elevations)}")
+            for e in elevations:
+                label = f" ({e['label']})" if e.get("label") else ""
+                print(f"  z={e['z']:g}{label} -> {e['n_points']} point(s)")
         return 0
 
     # Extraction path.
@@ -225,6 +256,8 @@ def main(argv: list[str] | None = None) -> int:
                 elevation=args.elevation,
                 only_loaded=args.only_loaded,
                 tag=args.tag,
+                force_unit=args.force_unit,
+                length_unit=args.length_unit,
             )
             print(
                 f"Extracted {len(df)} base-reaction rows across "
@@ -264,6 +297,8 @@ def main(argv: list[str] | None = None) -> int:
                 run_analysis=args.run_analysis,
                 frames=args.frames,
                 tag=args.tag,
+                force_unit=args.force_unit,
+                length_unit=args.length_unit,
             )
             print(
                 f"Extracted {len(df)} rows across {len(per_load)} load name(s)."

@@ -12,7 +12,8 @@
 #   3. Runs `python -m etabs_extractor.gui` under it.
 #
 # Requires ETABS running (or use the GUI's "Attach (not launch)" / launch
-# option) and a display for the tkinter window.
+# option), a display for the customtkinter window, and `customtkinter`
+# installed on the Windows Python (pip install customtkinter).
 #
 # Usage:
 #   ./run_gui.sh

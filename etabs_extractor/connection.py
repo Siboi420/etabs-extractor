@@ -20,10 +20,12 @@ a fake.
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 from typing import TYPE_CHECKING, Any
 
 from .config import DEFAULT_COM_PROGID, to_windows_path
+from .units import ETABS_EUNITS, ETABS_FORCE_ENUM, ETABS_LENGTH_ENUM, UnitSystem
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -229,6 +231,97 @@ class EtabsSession:
         if out is None:
             return ""
         return str(out).strip()
+
+    # -- Units / elevations ---------------------------------------------------
+
+    def get_present_units(self) -> "UnitSystem":
+        """Return the model's currently active (force, length) unit system.
+
+        Tries ``GetPresentUnits_2()`` first (returns ``[forceEnum,
+        lengthEnum, tempEnum, retcode]``, the modern per-dimension API), and
+        falls back to the legacy combined ``GetPresentUnits()`` (a single
+        ``eUnits_*`` enum) if that call is unavailable. Read-only — this
+        never calls ``SetPresentUnits`` and never mutates the model.
+
+        :raises EtabsConnectionError: if neither API call succeeds.
+        """
+        try:
+            out = self.sap_model.GetPresentUnits_2(0, 0, 0)
+            if isinstance(out, (list, tuple)) and len(out) >= 2:
+                force_val = _to_int_safe(out[0])
+                length_val = _to_int_safe(out[1])
+                force = ETABS_FORCE_ENUM.get(force_val) if force_val is not None else None
+                length = ETABS_LENGTH_ENUM.get(length_val) if length_val is not None else None
+                if force and length:
+                    return UnitSystem(force, length)
+        except Exception as exc:  # noqa: BLE001 - fall through to legacy call
+            logging.getLogger(__name__).debug(
+                "GetPresentUnits_2 failed, falling back to GetPresentUnits: %s", exc
+            )
+
+        try:
+            out = self.sap_model.GetPresentUnits()
+            val = _to_int_safe(out)
+            pair = ETABS_EUNITS.get(val) if val is not None else None
+            if pair:
+                return UnitSystem(*pair)
+        except Exception as exc:  # noqa: BLE001
+            raise EtabsConnectionError(f"GetPresentUnits failed: {exc}") from exc
+
+        raise EtabsConnectionError(
+            "Could not resolve the model's present units (unrecognized enum value)."
+        )
+
+    def get_story_elevations(self) -> dict:
+        """Return the model's story table via ``Story.GetStories_2``.
+
+        ``{"base": float | None, "stories": [(name, elevation), ...]}``
+        (model length units). ``stories`` is ordered as returned by the API
+        (typically bottom-to-top). Best-effort: raises
+        :class:`EtabsConnectionError` on COM failure so callers can degrade
+        to an empty result.
+        """
+        try:
+            out = self.sap_model.Story.GetStories_2()
+        except Exception as exc:  # noqa: BLE001
+            raise EtabsConnectionError(f"Story.GetStories_2 failed: {exc}") from exc
+        if not isinstance(out, (list, tuple)) or len(out) < 4:
+            return {"base": None, "stories": []}
+        base = _f_coord(out, 0)
+        names = list(out[2] or []) if len(out) > 2 else []
+        elevs = list(out[3] or []) if len(out) > 3 else []
+        stories = list(zip((str(n) for n in names), (_to_float_safe(e) for e in elevs)))
+        return {"base": base, "stories": stories}
+
+    def get_all_point_coords(self) -> dict[str, tuple[float | None, float | None, float | None]]:
+        """Return ``{point_name: (x, y, z)}`` for every point object in one
+        COM call via ``PointObj.GetAllPoints``.
+
+        Falls back to per-point ``get_point_coords`` calls (via
+        ``get_point_names``) if ``GetAllPoints`` is unavailable on the
+        installed ETABS version.
+        """
+        try:
+            out = self.sap_model.PointObj.GetAllPoints(0, [], [], [], [], "Global")
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).debug(
+                "PointObj.GetAllPoints failed, falling back to per-point reads: %s", exc
+            )
+            return {p: self.get_point_coords(p) for p in self.get_point_names()}
+        if not isinstance(out, (list, tuple)) or len(out) < 5:
+            return {}
+        names = list(out[1] or [])
+        xs = list(out[2] or [])
+        ys = list(out[3] or [])
+        zs = list(out[4] or [])
+        result: dict[str, tuple[float | None, float | None, float | None]] = {}
+        for i, name in enumerate(names):
+            result[str(name)] = (
+                _f_coord(xs, i),
+                _f_coord(ys, i),
+                _f_coord(zs, i),
+            )
+        return result
 
     # -- Introspection used by the extractor ---------------------------------
 
@@ -478,6 +571,30 @@ def _gp(func) -> tuple[int | None, list]:
     count = out[0]
     names = list(out[1] or [])
     return count, names
+
+
+def _to_int_safe(value) -> int | None:
+    """Null-safe coercion to ``int`` (returns ``None`` rather than raising)."""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_float_safe(value) -> float | None:
+    """Null-safe coercion to ``float`` (returns ``None`` rather than raising)."""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _f_coord(seq, i) -> float | None:

@@ -37,6 +37,8 @@ def build_mode_kwargs(settings: GuiSettings) -> dict:
             "attach": settings.attach,
             "launch": not settings.attach,
             "tag": settings.tag or None,
+            "force_unit": settings.force_unit,
+            "length_unit": settings.length_unit,
         }
     return {
         "model_path": settings.model_path or None,
@@ -53,6 +55,8 @@ def build_mode_kwargs(settings: GuiSettings) -> dict:
         "attach": settings.attach,
         "launch": not settings.attach,
         "tag": settings.tag or None,
+        "force_unit": settings.force_unit,
+        "length_unit": settings.length_unit,
     }
 
 
@@ -93,6 +97,32 @@ def build_figure_kwargs(settings: GuiSettings) -> dict:
         "x_offset": settings.x_offset,
         "y_offset": settings.y_offset,
     }
+
+
+def build_elevation_labels(
+    elevations: list[dict], model_length: str, length_unit: str
+) -> list[str]:
+    """Format a model's elevation inventory (see
+    :func:`~etabs_extractor.results.list_elevations`, values in the model's
+    own length unit) into combobox labels displayed in ``length_unit``
+    (``"model"``/``""`` means no conversion).
+
+    E.g. ``{"z": -18550.0, "label": "Base", "n_points": 42}`` with
+    ``model_length="mm"``, ``length_unit="m"`` -> ``"-18.55  (Base, 42 pts)"``.
+    """
+    from etabs_extractor.units import LENGTH_TO_M
+
+    src = model_length or "mm"
+    dst = src if length_unit in (None, "", "model") else length_unit
+    scale = LENGTH_TO_M.get(src, 1.0) / LENGTH_TO_M.get(dst, 1.0)
+    labels = []
+    for e in elevations:
+        z = e["z"] * scale
+        label = e.get("label") or ""
+        n = e.get("n_points", 0)
+        suffix = f"{label}, {n} pts" if label else f"{n} pts"
+        labels.append(f"{z:g}  ({suffix})")
+    return labels
 
 
 def sanitize_tag(tag: str) -> str:
@@ -176,6 +206,7 @@ def load_from_csv(settings: GuiSettings) -> dict:
 
         plot_paths = plot_base_reactions_from_csv(
             csv_path,
+            (settings.plot_output_dir or "").strip() or None,
             components=None,
             **{k: v for k, v in build_plot_kwargs(settings).items()
                if k in ("fmt", "units", "label_fontsize", "dynamic_size",
@@ -207,13 +238,16 @@ def check_active_model(attach: bool = True, session=None) -> str:
 
 def inspect_active_model(attach: bool = True, session=None) -> dict:
     """Attach (or reuse) an ETABS session and return the active model's
-    inventory: ``{"model_path", "combos", "cases", "sections", "frames"}``.
+    inventory: ``{"model_path", "combos", "cases", "sections", "frames",
+    "units", "elevations"}``.
 
     When ``session`` is ``None`` a real COM session is attached (or launched
     when ``attach`` is False); otherwise the provided duck-typed session (e.g.
     a test fake) is used directly.  Reads ``get_model_filename`` /
     ``get_combo_names`` / ``get_case_names``, plus best-effort
-    ``get_frame_section_names`` / ``get_frame_names`` (degrades to ``[]``)."""
+    ``get_frame_section_names`` / ``get_frame_names`` / ``get_present_units``
+    / :func:`~etabs_extractor.results.list_elevations` (each degrades to
+    ``[]``/``{}`` rather than failing the whole check)."""
     from etabs_extractor.connection import EtabsSession
 
     own = session is None
@@ -238,6 +272,21 @@ def inspect_active_model(attach: bool = True, session=None) -> dict:
                 )
                 print(f"[etabs_extractor] Could not list {key}: {exc}")
                 info[key] = []
+        try:
+            units = session.get_present_units()
+            info["units"] = {"force": units.force, "length": units.length}
+        except Exception as exc:  # noqa: BLE001 - best-effort units
+            import logging
+            logging.getLogger(__name__).debug("Could not read present units: %s", exc)
+            info["units"] = {"force": "", "length": ""}
+        try:
+            from etabs_extractor.results import list_elevations
+
+            info["elevations"] = list_elevations(session)
+        except Exception as exc:  # noqa: BLE001 - best-effort elevation list
+            import logging
+            logging.getLogger(__name__).debug("Could not list elevations: %s", exc)
+            info["elevations"] = []
         return info
     except Exception as exc:  # noqa: BLE001 - root-cause tooltip
         raise RuntimeError(f"Could not inspect active model: {exc}") from exc

@@ -1,10 +1,14 @@
 # etabs_extractor
 
 Extract results from an **ETABS 22** model via the CSI COM API and write
-them to CSV (also returning pandas DataFrames):
+them to CSV (also returning pandas DataFrames), **in the active model's own
+units by default** (or any unit system you request — see "Units" below):
 
 - **frame-element internal forces** — axial `P`, shears `V2`/`V3`, torsion
-  Each row also carries the frame object's **Euclidean length** in mm (`length_mm` column), computed from the end-point coordinates via `FrameObj.GetPoints`. Unknown/unresolvable lengths are `None` (NaN in the DataFrame).
+  Each row also carries the frame object's **Euclidean length** (`length_mm`
+  column, named for historical reasons but now in the output length unit),
+  computed from the end-point coordinates via `FrameObj.GetPoints`.
+  Unknown/unresolvable lengths are `None` (NaN in the DataFrame).
   `T`, moments `M2`/`M3` for every frame object across the model's load
   combinations (and optionally load cases) — `--extract frame` (default).
 - **per-joint (base) reactions** — reaction forces `F1`/`F2`/`F3` and moments
@@ -43,6 +47,12 @@ cd ~/Projects/Structural\ Works/etabs_extractor
 # Also plot plan-view figures of the base reactions (one PNG per load):
 ./run_etabs.sh --extract base --model "/mnt/d/.../model.EDB" \
     --combos "ASD 1" "LRFD 1" --output "/mnt/d/.../out" --plot
+
+# Output in specific units instead of the model's own (default: model units,
+# read live via the COM API — see "Units" below):
+./run_etabs.sh --extract base --model "/mnt/d/.../model.EDB" \
+    --combos "ASD 1" "LRFD 1" --output "/mnt/d/.../out" \
+    --force-unit kN --length-unit m
 ```
 
 See "Running from WSL against a live ETABS (`run_etabs.sh`)" below for
@@ -50,14 +60,14 @@ details and fallbacks.
 
 ## Interactive GUI (base reactions + frame forces)
 
-A **tkinter GUI** (`etabs_extractor/gui/`) provides a point-and-click way to
-check the active ETABS model, choose an export destination and filename tag,
-configure plot appearance (dynamic figure size, fixed width/height, DPI —
-default 800 — and label font size), and **switch between two extraction
-modes**: **Base reactions** (default) or **Frame forces**. In base mode it
-plots plan-view figures of the base reactions and previews / saves them; it
-also plots from an existing base CSV with no ETABS running. Plotting stays
-base-only.
+A **customtkinter GUI** (`etabs_extractor/gui/`) provides a point-and-click
+way to check the active ETABS model, choose an export destination and
+filename tag, configure plot appearance, and **switch between two extraction
+modes**: **Base reactions** (default) or **Frame forces**. It's a sidebar +
+tabbed-workspace layout: the sidebar holds the model/output/mode/load
+controls and the single **Extract** action; the workspace tabs hold the
+**Preview** (rendered inline — no pop-up windows), **Plot settings**, **CSV**
+(plot from an existing base CSV, no ETABS needed) and **Log**.
 
 Launch from WSL against Windows ETABS:
 
@@ -74,67 +84,96 @@ python -m etabs_extractor.gui
 
 In the window:
 
-- **Extraction mode** — two radio buttons at the top: **Base reactions**
-  (default) or **Frame forces**. Base mode shows the elevation / loaded-
-  supports controls, plot-appearance frame, CSV frame and plan-preview row;
-  frame mode shows a **Frames** selector instead (hiding the base-only
-  controls).
-- **Model row** — file entry + Browse (`*.EDB` / `*.et`) + **"Check active
-  model"**, which attaches to the running ETABS, fills the path field via
-  `SapModel.GetModelFilename` (a cSapModel method on the model object, not
-  the File interface; no path needed), **and** populates the load dropdown
-  with the active model's **combinations and load cases** (via
-  `get_combo_names` / `get_case_names`), and in frame mode also
-  populates the **Frames** selector with the model's **sections and
-  frame objects** (via `get_frame_section_names` / `get_frame_names`).
-- **Frames selector** (frame mode) — a **searchable multi-select
-  checklist** of the model's **sections + frame objects**, multi-select
-  within each group is a union, empty is no filter, and sections +
-  frames combine AND when both are selected.
-- **Destination row** — directory entry + Browse (defaults to `ETABS_OUTPUT`).
-- **Tag row** — a filename suffix applied to every output (sanitized).
-- **Load selection** — a **searchable multi-select checklist** of the active
-  model's **combos + load cases** (opened via the **Select** button / click);
-  you can search-as-you-type and tick as many combos and cases as you want.
-  An empty selection keeps the default (all model combos). Optional
-  `elevation`, and checkboxes for `only_loaded`, `run_analysis`, and `attach`
-  (vs launch).
-  - The plot preview renders **one marker per distinct plan (x/y) point
-    returned by the extraction**. Envelope combos (Max/Min) are collapsed to
-    a single governing marker per point (largest absolute value), so they do
-    **not** duplicate points. However, points at the base level with all-zero
-    reactions (non-load-bearing joints) still get a marker unless
-    **"Only loaded supports"** is checked. For a clean plan-view of just the
-    real supports, set `elevation` (e.g. `-16000`) **and** check `only_loaded`.
-- **Plot appearance** — `dynamic size` checkbox (figure follows data) with
+- **Model & output card** — model file entry + Browse (`*.EDB` / `*.et`) +
+  **"Check active model"**, which attaches to the running ETABS, fills the
+  path field via `SapModel.GetModelFilename` (a cSapModel method on the model
+  object, not the File interface; no path needed), and populates the **Load
+  selection** picker with the active model's **combos + cases** (via
+  `get_combo_names` / `get_case_names`), for frame mode the **Sections**
+  picker with the model's **section names** (via `get_frame_section_names`),
+  and (see **Units** card below) the model's **present units** and **elevation
+  inventory**. A status line under the button shows the checked model path and
+  the combo/case/section counts. Also holds the output directory (defaults to
+  `ETABS_OUTPUT`, with a **Browse** button — like the Model field's, always
+  visible/clickable regardless of window width; both fields stack their label
+  above the entry+Browse row rather than packing all three side by side), a
+  **Tag** field (filename suffix, sanitized, with a live "Suffix: _xxx" hint),
+  and **Attach (not launch)** / **Run analysis** switches.
+- **Units card** — **Force** and **Length** dropdowns selecting the output
+  unit system (default **`model`** on both — the active model's own present
+  units, read live via `EtabsSession.get_present_units()`; no conversion), plus
+  a hint line showing "Model: `<force>, <length>` → Output: `<force>,
+  <force>·<length>, <length>`" once the model has been checked. Changing
+  either dropdown re-renders the hint and re-labels the Elevation combobox
+  below (see **Base filters**) in the newly selected length unit.
+- **Extraction mode card** — a segmented **Base reactions** / **Frame
+  forces** switch. Switching mode swaps the sidebar's mode-scoped filter card
+  and the workspace Preview tab's contents (base plan-view panel vs. frame
+  force-diagram panel) — nothing is hidden behind a checkbox, the layout just
+  changes.
+- **Load selection card** — a **searchable multi-select checklist** of the
+  active model's **combos + cases** (opened via the **Select** button/click
+  on the summary field); search-as-you-type, tick as many as you want. An
+  empty selection keeps the default (all model combos).
+- **Base filters** (base mode only) — an **editable Elevation combobox**
+  (label reads "Elevation (`<unit>`)"), switches for **Only loaded supports**
+  and **Plot after extract**. "Check active model" fills the combobox with
+  every distinct elevation the model has, labelled by story name (or "Base"
+  for the model's base level) and point count — e.g. `-18.55  (Base, 42
+  pts)` — displayed in the currently selected output length unit; you can
+  also just type a value. Parsing takes the leading number and ignores the
+  trailing `(...)` label.
+  - The base preview renders **one marker per distinct plan (x/y) point**.
+    Envelope combos (Max/Min) collapse to a single governing marker per point
+    (largest absolute value), so they do **not** duplicate points. Points
+    with all-zero reactions (non-load-bearing joints) still get a marker
+    unless **"Only loaded supports"** is checked. For a clean plan-view of
+    just the real supports, set `elevation` (e.g. from the dropdown) **and**
+    check `only_loaded`.
+- **Section filter** (frame mode only) — the same searchable multi-select
+  checklist widget, over the model's section names; empty = all sections.
+- **Extract** — a single button at the bottom of the sidebar. Runs on a
+  **background thread** (`gui/runner.py`'s `BackgroundRunner`, COM
+  initialised in the worker via comtypes `CoInitialize()`/`CoUninitialize()`
+  — required on Windows, a no-op elsewhere), so the UI stays responsive; the
+  status bar's progress indicator animates while a job is in flight and the
+  sidebar's action buttons disable. On completion the workspace switches to
+  the **Preview** tab and renders the first load automatically.
+- **Preview tab** — embedded, not a pop-up:
+  - *Base mode* (`BasePreviewPanel`): a Load dropdown, **Refresh** (re-reads
+    the Plot settings tab and re-renders) and **Save image...** buttons over
+    an embedded matplotlib canvas.
+  - *Frame mode* (`FramePreviewPanel`): Load / Section / Step
+    (Both/Max/Min) / Force (Moment M3, Shear V2, Axial P) / Length
+    dropdowns, **Refresh**, **Save image...**, and **Batch plot all
+    (overlay)** (every beam of that section+length in one diagram, star =
+    highest |force|). The beam shown is always the one with the highest
+    |force| at the current selection — there's no beam dropdown.
+- **Plot settings tab** — `dynamic size` switch (figure follows data) with
   width/height fields disabled while dynamic; **X/Y label offsets (in)**
   (default 1.0 in each way — extra axis-limit padding so edge point labels
-  render inside the axes box), dpi (default 800), label font
-  size (default 2.4), units (`model`/`kN-m`), format (`png`/`pdf`/`svg`); plus
-  a **"Plot after extract"** checkbox.
-- **Actions** — a single **Extract** button in the bottom bar (next to
-  `Quit`), plus the `Plot preview` opener above. There is **one** Extract
-  button only.
-- **Plot from existing CSV (no ETABS)** — pick a base CSV, "Load preview".
-- **Plot preview (pop-up window, manual)** — a separate ``Plot preview`` button
-  opens the preview in its own pop-up window (load dropdown + embedded
-  matplotlib canvas + ``Preview`` / ``Refresh`` / ``Save preview image``
-  buttons); it is shared by both extract and CSV results.  It is **not**
-  auto-opened after Extract / Load-preview — only the ``Plot preview`` button
-  opens it.  When a result is loaded the **first load renders automatically**
-  with the current plot settings; the **Refresh** button re-captures the
-  appearance settings from the main window (font size, units, offsets, …) and
-  re-renders the selected load.
+  render inside the axes box), dpi (default 800), label font size (default
+  2.4), **units** (`data` default — the extraction's own units, unconverted;
+  plus `kN-m`/`kN-mm`/`N-mm`/`tonf-m`/`kgf-m`), format (`png`/`pdf`/`svg`).
+  Applies to the base preview and to `--plot-after-extract`/CSV plotting; the
+  frame preview's "Save image..." always saves at dpi 150 (diagram, not a
+  publication plan-view).
+- **CSV tab** — pick a base-reaction CSV, an optional **Plot output**
+  directory (Browse; blank saves next to the CSV file), and **Load preview**
+  (no ETABS/COM needed); the result renders in the base Preview panel like a
+  live extract.
+- **Log tab** — a running, timestamped log of every action (also mirrored to
+  the status-bar line).
+- **Status bar** — progress indicator + status text + an **Appearance**
+  selector (`System`/`Light`/`Dark`, applies immediately via
+  `ctk.set_appearance_mode`). The app chrome follows the theme; **plotted
+  figures stay light** (white background) on screen and when saved — the
+  point labels are drawn in white boxes, so a dark plot would put white text
+  on white.
 
-Extract / Load preview run in a **background thread** (COM is initialised in
-the worker via comtypes `CoInitialize()`/`CoUninitialize()` — required on
-Windows; a no-op elsewhere), so the UI stays responsive with a progress bar
-and status line.
-
-The live in-GUI preview canvas needs **matplotlib installed on the Windows
+The embedded preview canvases need **matplotlib installed on the Windows
 Python** that drives the GUI (the one `run_gui.sh` discovers). If it's
-missing, the preview shows a message like `Preview needs matplotlib: ...
-Install it on the Windows Python (pip install matplotlib).` — install it via
+missing, the preview logs `Preview needs matplotlib: ...` — install it via
 ``<windows-python> -m pip install matplotlib``.
 
 > **Note on "Check active model"**: it attaches to the *running* ETABS
@@ -162,8 +201,12 @@ python -m etabs_extractor --plot-csv out/all_base_reactions.csv
 # Custom image format (png default; also pdf, svg):
 python -m etabs_extractor --plot-csv out/all_base_reactions.csv --plot-format pdf
 
-# Plot with coordinates in m instead of mm (forces/moments are always kN/kN·m):
+# Plot in a specific unit system, converted from whatever the CSV itself
+# carries (its own force_unit/length_unit columns):
 python -m etabs_extractor --plot-csv out/all_base_reactions.csv --units kN-m
+
+# Any "<force>-<length>" pair works, e.g. tonnes-force and millimetres:
+python -m etabs_extractor --plot-csv out/all_base_reactions.csv --units tonf-mm
 
 # Append a filename suffix to every CSV / plot (e.g. `_KM13`):
 python -m etabs_extractor --plot-csv out/all_base_reactions.csv --tag KM13
@@ -176,10 +219,13 @@ labelled with its **point/joint number as the first line** (bare number, e.g.
 `1`), followed by its `Fz`, `M2`, `M3` values. See "Library API"
 for the components map and how to change/annotate a different set.
 
-`--units` controls the coordinate display unit: `model` (default; kN, kN·m, mm)
-or `kN-m` (kN, kN·m, m — coordinates mm→m). Base reactions are exported in
-kN / kN·m, so forces and moments are shown in those units under both systems;
-only the coordinate length unit differs. Both `--plot` and `--plot-csv` accept it.
+`--units` selects the plot's display units: `model`/`data` (default —
+display the CSV/DataFrame's own units unconverted, i.e. whatever the
+extraction was run with), a named preset (`kN-m`, `kN-mm`, `N-mm`, `tonf-m`,
+`kgf-m`), or any `"<force>-<length>"` pair (e.g. `tonf-mm`). The source units
+are read from the CSV's own `force_unit`/`length_unit` columns (see "Units"
+below); a legacy CSV without those columns falls back to the historical
+`kN`/`mm` assumption. Both `--plot` and `--plot-csv` accept it.
 
 ## Filename suffix (`--tag NAME`)
 
@@ -221,16 +267,49 @@ takes the default (no suffix). Example with `--tag KM13`:
 
 ## Units
 
-The model in this project is configured in **N, mm, °C**. Frame forces come
-out as `P`, `V2`, `V3` in **N**; moments `T`, `M2`, `M3` in **N·mm**
-(frame forces are not converted).
+Extraction is **model-aware**: it reads the active model's own present
+force/length units live via the COM API (`SapModel.GetPresentUnits_2` /
+`GetPresentUnits`, wrapped as `EtabsSession.get_present_units()` ->
+`etabs_extractor.units.UnitSystem`) instead of assuming a fixed unit system.
+By default (`--force-unit model --length-unit model`, or simply omitting
+both flags) the output is in **whatever units the model itself is set to** —
+no conversion, no guessing. Every frame-force and base-reaction row (and
+CSV) carries the resolved units as trailing `force_unit`/`length_unit`
+columns (e.g. `"kN"` / `"m"`), so a file is always self-describing; moments
+are `force_unit·length_unit` (e.g. `"kN·m"`).
 
-**Base reactions are exported in kN / kN·m:** reaction forces `F1`-`F3` are
-converted from source N to **kN**, and reaction moments `M1`-`M3` are
-converted from source N·mm to **kN·m** (forces ÷ 1000, moments ÷ 1e6).
-Coordinates `x`/`y`/`z` stay in **mm** (`z` = elevation). Columns are labeled
-with these units; the conversion is applied at extraction so both the
-returned DataFrame and every written CSV carry converted values.
+Pass `--force-unit` / `--length-unit` (CLI) or `force_unit=`/`length_unit=`
+(library) to have the extraction convert to a specific system instead:
+
+```bash
+# Model is e.g. kN/m; ask for kN/mm output instead:
+python -m etabs_extractor --model "path" --extract base --force-unit kN --length-unit mm --output out
+```
+
+- `--force-unit`: `model` (default), `N`, `kN`, `kgf`, `tonf`, `lb`, `kip`.
+- `--length-unit`: `model` (default), `mm`, `cm`, `m`, `in`, `ft`.
+
+Coordinates `x`/`y`/`z` (base reactions) and `station`/`length_mm`/`obj_sta`/
+`elm_sta` (frame forces) scale with the length unit; `F1`-`F3`/`P`/`V2`/`V3`
+scale with the force unit; `M1`-`M3`/`T`/`M2`/`M3` scale with force×length
+(moment). `--elevation` is interpreted in the **output** length unit (so a
+model reported in metres takes e.g. `--elevation -18.55`, not `-18550`).
+
+This replaced an earlier hardcoded assumption (frame forces always N/N·mm,
+base reactions always exported as kN/kN·m) that silently gave wrong numbers
+on any model not actually configured in those units — e.g. a model set to
+kN/m had its coordinates divided by 1000 as if they were millimetres. The
+model-aware default fixes that; pass explicit `--force-unit`/`--length-unit`
+to reproduce the old fixed-unit behavior if you depend on it (`kN`/`mm` for
+base reactions matched the historical default).
+
+**Listing a model's elevations** — `--list-only` (CLI) / "Check active
+model" (GUI) additionally read the model's story table (`Story.
+GetStories_2`) and every point's `z` coordinate (`PointObj.GetAllPoints`, one
+COM call) to report the distinct elevations, each labelled by story name (or
+`"Base"` for the model's base level) with a point count — see
+`etabs_extractor.results.list_elevations()`. Use this to find a level's exact
+elevation before passing `--elevation`.
 
 ## Requirements / runtime
 
@@ -240,6 +319,11 @@ returned DataFrame and every written CSV carry converted values.
 - Python ≥ 3.9 with `comtypes`, `pandas`, and `matplotlib` (matplotlib is
   needed only for plotting; it is imported lazily so the pure core imports
   fine without it).
+- The **GUI** additionally needs `customtkinter` (>=5.2.0) on whichever
+  Python launches it (the WSL `.venv` for editing/tests, and the **Windows**
+  Python that `run_gui.sh` drives for a live run). If it's missing, `run_gui`
+  prints a one-line `pip install customtkinter` hint instead of a raw
+  traceback.
 
 ```bash
 pip install -r etabs_extractor/requirements.txt
@@ -283,11 +367,17 @@ python -m etabs_extractor --model "path" --extract base --combos "ASD Max" "LRFD
 # Plot base reactions right after extraction (one PNG per load):
 python -m etabs_extractor --model "path" --extract base --combos "ASD 1" "LRFD 1" --output out --plot
 
-# ... with coordinates in m (forces/moments are always kN/kN·m):
+# ... displayed in kN/m regardless of the extraction's own units:
 python -m etabs_extractor --model "path" --extract base --combos "ASD 1" "LRFD 1" --output out --plot --units kN-m
 
 # Standalone plotting from an existing CSV (no COM/model; WSL-ok):
 python -m etabs_extractor --plot-csv out/all_base_reactions.csv --plot-format png --units kN-m
+
+# Output in a specific unit system instead of the model's own (see "Units"):
+python -m etabs_extractor --model "path" --extract base --force-unit kN --length-unit m --output out
+
+# List a model's distinct elevations (labelled by story) alongside the usual inventory:
+python -m etabs_extractor --model "path" --list-only
 
 # No CSV output (DataFrames only), re-run analysis first:
 python -m etabs_extractor --model "path" --no-csv --run-analysis
@@ -299,22 +389,25 @@ output dir via `ETABS_OUTPUT`. The package **never hardcodes** model paths.
 `--extract` takes `frame` (default) or `base`. `--frames` filters frame
 objects for `--extract frame`; per-load MIN/MAX step split CSVs are emitted
 automatically for frame envelope combos (see Outputs). `--points` filters
-point objects and `--elevation` restricts to a single `z` elevation (model
-length units, e.g. `-16000`) and `--only-loaded` drops all-zero supports for
-`--extract base` (point-name filter applied first, and only the matching
-level is read). `--list-only` reports `Frame objs`, `Point objs`, `Combos`,
-and `Load cases`.
+point objects and `--elevation` restricts to a single `z` elevation
+(**output** length unit — see "Units" — e.g. `-16000` for a model reported in
+mm, or `-16.0` with `--length-unit m`) and `--only-loaded` drops all-zero
+supports for `--extract base` (point-name filter applied first, and only the
+matching level is read). `--force-unit` / `--length-unit` select the output
+unit system (default `model` — the active model's own present units; see
+"Units"). `--list-only` reports `Frame objs`, `Point objs`, `Combos`,
+`Load cases`, `Units`, and the model's `Elevations` (one line per distinct
+level: `z`, story label, point count).
 
 `--plot` (after `--extract base`) renders one plan-view figure per load into
 the output dir; `--plot-csv PATH` is a standalone mode that reads a base CSV
 and plots it with no model/COM (wins over any model args and exits first).
 `--plot-format` sets the image format (default `png`). `--units` selects the
-coordinate display unit: `model` (default; kN, kN·m, mm) or `kN-m` (kN,
-kN·m, m — coordinates mm→m). Since base reactions are exported in kN / kN·m,
-forces and moments are shown in those units under both systems; only the
-coordinate length unit differs. `--tag NAME` appends `_NAME` to every CSV and
-plot filename (sanitized to a filesystem-safe suffix; see "Filename suffix"
-above).
+plot's display units: `model`/`data` (default — the CSV/DataFrame's own
+units, unconverted), a named preset (`kN-m`, `kN-mm`, `N-mm`, `tonf-m`,
+`kgf-m`), or any `"<force>-<length>"` pair. `--tag NAME` appends `_NAME` to
+every CSV and plot filename (sanitized to a filesystem-safe suffix; see
+"Filename suffix" above).
 
 ## Library API
 
@@ -332,6 +425,8 @@ df, per_load, records = extract_forces(
     frames=["B1", "C2"],  # optional object-name filter
     sections=["COL1"],    # optional section-name filter (AND with frames)
     tag="KM13",           # optional filename suffix
+    force_unit="model",   # default: the model's own present units (no conversion)
+    length_unit="model",  # pass e.g. "kN"/"m" to convert at extraction time
 )
 
 # Base (joint) reactions — same load-selection API:
@@ -339,27 +434,40 @@ bdf, bper_load, brecords = extract_base_reactions(
     "D:/models/KM 13 2.0.EDB", "out",
     combos=["ASD Max", "LRFD Max"],  # envelope combos
     points=["1", "2"],   # optional point-name filter
-    elevation=-16000.0,     # optional: only this z elevation
+    elevation=-16000.0,     # optional: only this z elevation (output length unit)
     only_loaded=True,        # optional: drop all-zero supports
     tag="KM13",             # optional filename suffix
+    force_unit="model", length_unit="model",  # see extract_forces above
 )
 
 info = list_available("D:/models/KM 13 2.0.EDB")
-# {"model_path":…, "frame_names":[…], "point_names":[…], "combos":[…], "cases":[…]}
+# {"model_path":…, "frame_names":[…], "point_names":[…], "combos":[…], "cases":[…],
+#  "units": {"force": "kN", "length": "m"}, "elevations": [{"z":…, "label":…, "n_points":…}, …]}
 
 # From an already-connected session, read the currently-open model's filename
 # (used by the GUI's "Check active model"):
 from etabs_extractor.connection import EtabsSession
 session = EtabsSession.connect(attach=True)          # attach to running ETABS
 name = session.get_model_filename(include_path=True) # e.g. "D:\...\model.EDB"
+units = session.get_present_units()                  # UnitSystem(force="kN", length="m")
+
+# List the model's distinct elevations, labelled by story (used by --list-only
+# and the GUI's elevation combobox):
+from etabs_extractor.results import list_elevations
+elevations = list_elevations(session)
+# [{"z": -18.55, "label": "Base", "n_points": 60}, …]  (model's own length unit)
 ```
 
-`df` (frame) is a long-format DataFrame with columns `frame, section, station, load_name, load_kind, step_type, P, V2, V3, T, M2, M3, length_mm, obj_sta, elm, elm_sta`.
+`df` (frame) is a long-format DataFrame with columns `frame, section, station,
+load_name, load_kind, step_type, P, V2, V3, T, M2, M3, length_mm, obj_sta,
+elm, elm_sta, force_unit, length_unit`.
 
-`bdf` (base) has columns `point, x, y, z, load_name, load_kind, F1, F2, F3,
-M1, M2, M3` (`z` is the elevation). `F1`-`F3` are in **kN** and `M1`-`M3` in
-**kN·m**; `x`/`y`/`z` are in model length units (mm). `per_load`/`bper_load`
-map each load name to its own DataFrame.
+`bdf` (base) has columns `point, x, y, z, load_name, load_kind, step_type,
+F1, F2, F3, M1, M2, M3, force_unit, length_unit` (`z` is the elevation).
+`force_unit`/`length_unit` name the unit system every row was converted to
+(default: the model's own present units — see "Units" above); `x`/`y`/`z`
+and `F1`-`F3`/`M1`-`M3` are in those units. `per_load`/`bper_load` map each
+load name to its own DataFrame.
 
 ```python
 from etabs_extractor import plot_base_reactions, plot_base_reactions_from_csv
@@ -369,7 +477,7 @@ from etabs_extractor import plot_base_reactions, plot_base_reactions_from_csv
 written = plot_base_reactions(bdf, "plots")               # -> [Path, ...]
 written = plot_base_reactions(bdf, "plots", fmt="pdf")      # pdf output
 written = plot_base_reactions(bdf, "plots", load_name="ASD 1")  # just one load
-written = plot_base_reactions(bdf, "plots", units="kN-m")    # coords in m
+written = plot_base_reactions(bdf, "plots", units="kN-m")    # convert to kN/m for display
 written = plot_base_reactions(bdf, "plots", tag="KM13")      # filename suffix
 
 # Plot-appearance control (all backward compatible):
@@ -402,15 +510,19 @@ Default plotted components and their mapping (extend as needed):
 from etabs_extractor import DEFAULT_COMPONENTS, COMPONENT_COLUMNS, COMPONENT_UNITS
 # DEFAULT_COMPONENTS == ("Fz", "M2", "M3")   (Fx/Fy intentionally omitted)
 # COMPONENT_COLUMNS == {"Fx": "F1", "Fy": "F2", "Fz": "F3", "M1": "M1", "M2": "M2", "M3": "M3"}
-# COMPONENT_UNITS   == {"Fx": "kN", "Fy": "kN", "Fz": "kN", "M1": "kN·m", "M2": "kN·m", "M3": "kN·m"}
+# COMPONENT_UNITS   == {"Fx": "kN", ...}  historical/reference labels only —
+#   the actual display unit is resolved per-plot from the data (see "Units").
 # Pass components=("Fx","Fy","Fz","M2","M3") to restore the full set.
 ```
 
-Unit systems are exposed as `UNITS` (keys `"model"` and `"kN-m"`), with
-`DEFAULT_UNITS == "model"`. Base reactions are already exported in kN / kN·m,
-so `force_scale`/`moment_scale` are identity (1.0) in both systems; the only
-difference is `length_scale` — `model` keeps coordinates in mm, `kN-m`
-converts them mm→m. `--units` maps to these on the CLI.
+Named display-unit presets are exposed as `UNITS` (`"kN-m"`, `"kN-mm"`,
+`"N-mm"`, `"tonf-m"`, `"kgf-m"`), with `DEFAULT_UNITS == "data"`. `"model"`/
+`"data"` (the default) display the DataFrame/CSV's own units (its
+`force_unit`/`length_unit` columns) unconverted; any other
+`"<force>-<length>"` string not in `UNITS` is also accepted (e.g.
+`"tonf-mm"`). `plots._resolve_units(units, df)` does the actual conversion
+math (see `etabs_extractor.units.factors`) and is what every plot entry
+point calls internally. `--units` on the CLI maps to the same values.
 
 ## Outputs
 
@@ -457,9 +569,9 @@ filtering for dot-plotting is done downstream.
 
 - `base_<load>_plan.<fmt>` — one plan-view x-y figure per load name, each
   support annotated with its point/joint number (first label line) followed by
-  its `Fz, M2, M3` values (default components; forces in kN and moments in
-  kN·m under both `--units` systems, coordinates in mm by default or m with
-  `--units kN-m`). `--plot-format` selects the extension (default `png`).
+  its `Fz, M2, M3` values, displayed in the units selected by `--units`
+  (default `model`/`data` — the extraction's own units, unconverted).
+  `--plot-format` selects the extension (default `png`).
 - **Step-aware naming:** plotting a subset that holds exactly one distinct
   `step_type` (e.g. `--plot-csv` on `base_combo_<load>_min.csv`) produces
   `base_<load>_plan_min.<fmt>` (title `ASD Max (Min)`); the `_max.csv` →
@@ -478,17 +590,23 @@ MPLBACKEND=Agg python3 etabs_extractor/tests/test_dry_run.py
 MPLBACKEND=Agg python3 etabs_extractor/tests/test_plot_settings.py
 ```
 
-`test_dry_run.py` injects a `FakeSapModel` stub that returns fabricated force
-and reaction arrays, exercising the real extraction → DataFrame → CSV →
-**plot** pipeline for **both** the frame (`extract_forces`) and base
-(`extract_base_reactions`) paths, asserting column order, CSV row counts, and
-that one plan PNG per load is produced (and the CSV-driven `plot-csv` path
-yields the same). `test_plot_settings.py` covers the GUI's pure layers and the
-reusable figure builder headlessly: `build_base_reactions_figure` fixed vs
-dynamic size and no-points→`None`, `plot_base_reactions` dpi/figsize/fontsize
-threading, and the `gui.service` settings→args mapping + `gui.state` parsing
-(no display, no comtypes). The tests set `matplotlib.use("Agg")` for headless
-runs. All stub values are synthetic; the dry run does **not** fabricate any
+`test_dry_run.py` injects a `FakeSapModel` stub (present units N/mm, a story
+table, and per-point coordinates) that returns fabricated force and reaction
+arrays, exercising the real extraction → DataFrame → CSV → **plot** pipeline
+for **both** the frame (`extract_forces`) and base (`extract_base_reactions`)
+paths, asserting column order (including the `force_unit`/`length_unit`
+columns), CSV row counts, model-aware unit conversion (an explicit
+`force_unit="kN", length_unit="m"` extraction against the same N/mm fake),
+`list_elevations()` story labelling, and that one plan PNG per load is
+produced (and the CSV-driven `plot-csv` path yields the same).
+`test_plot_settings.py` covers the GUI's pure layers and the reusable figure
+builder headlessly: `build_base_reactions_figure` fixed vs dynamic size and
+no-points→`None`, `plot_base_reactions` dpi/figsize/fontsize threading, the
+`gui.service` settings→args mapping (incl. `force_unit`/`length_unit`,
+`build_elevation_labels`) + `gui.state` parsing (incl. the elevation
+combobox's labelled-entry format), and `etabs_extractor.units`'s conversion
+factors (no display, no comtypes). The tests set `matplotlib.use("Agg")` for
+headless runs. All stub values are synthetic; the dry run does **not** fabricate any
 real-model results.
 
 ## Design notes / limitations
@@ -512,12 +630,14 @@ real-model results.
   fine even where matplotlib is absent — only the explicit plot entry points
   require it.
 - The **GUI** (`etabs_extractor/gui/`) follows the same discipline: importing
-  the package (or `gui.app`) never requires a display or comtypes — `tkinter`
-  is imported inside the application methods and `matplotlib` only inside the
-  preview canvas / plot calls. `gui/state.py` and `gui/service.py` are pure
-  and headless-testable. Extraction runs on a background thread (COM
-  initialised in the worker) and posts queue messages so the Tk main thread
-  stays responsive.
+  the package (or `gui.app`) never requires a display or comtypes —
+  `customtkinter`/`tkinter` are imported inside the application methods and
+  `matplotlib` only inside the preview canvas / plot calls. `gui/state.py`
+  and `gui/service.py` are pure and headless-testable. Extraction runs on a
+  background thread (`gui/runner.py`'s `BackgroundRunner`, COM initialised in
+  the worker) and posts queue messages so the main thread stays responsive.
+  Previews are embedded panels in the workspace tabs (no separate pop-up
+  windows).
 - Plotting annotates every support with its component values; with many
   points labels can crowd. Filter to a single base level upstream
   (`--elevation` / `--only-loaded`) for cleaner figures.
@@ -596,6 +716,10 @@ backs `run_gui.sh` for the interactive GUI.
 ```bash
 cd ~/Projects/Structural\ Works/etabs_extractor
 
+# First time only: install the GUI's extra dependency on the Windows Python
+# that run_gui.sh drives (see "Requirements / runtime" above):
+#   <windows-python> -m pip install customtkinter
+
 # Launch the GUI (Windows Python, ETABS should be running):
 ./run_gui.sh
 ```
@@ -631,6 +755,8 @@ the selected section type and load case.
 | `H` | Toggle auto-select highest-force beam |
 | `Q` | Quit |
 
-**Force display:** raw model values (N / N·mm) are converted to kN / kN·m
-for readability. Positive and negative regions are filled in green and red
+**Force display:** always shown in kN / kN·m / m regardless of the CSV's own
+units — read from its `force_unit`/`length_unit` columns and converted for
+display (a legacy CSV without those columns falls back to the historical N /
+mm assumption). Positive and negative regions are filled in green and red
 respectively, with max/min annotations on each diagram.

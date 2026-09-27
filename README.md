@@ -12,8 +12,9 @@ them to CSV (also returning pandas DataFrames):
 - **plan-view plotting** of the base reactions (one PNG per load, point
   labels, envelope Max/Min steps), from a live model or from an existing CSV
   (`--plot` / `--plot-csv`, no ETABS needed).
-- **interactive tkinter GUI** (`etabs_extractor/gui/`, `./run_gui.sh`) for
-  base-reaction extraction, plot preview, and CSV plotting.
+- **interactive customtkinter GUI** (`etabs_extractor/gui/`, `./run_gui.sh`)
+  for base-reaction and frame-force extraction, embedded plot/beam-force
+  preview, and CSV plotting.
 
 > **COM is Windows-only.** The package talks to ETABS through `comtypes`,
 > which requires a Windows Python process. The pure-Python core (models,

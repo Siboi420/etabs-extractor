@@ -9,7 +9,10 @@ values into a settings object / write them back to the widgets.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+
+from etabs_extractor.units import FORCE_CHOICES, LENGTH_CHOICES
 
 
 @dataclass
@@ -22,6 +25,9 @@ class GuiSettings:
     output_dir: str = ""
     tag: str = ""
 
+    # Appearance
+    appearance_mode: str = "System"  # "System", "Dark", "Light"
+
     # Load selection (multi-select checklist; empty lists = all model combos)
     selected_combos: list[str] = field(default_factory=list)
     selected_cases: list[str] = field(default_factory=list)
@@ -29,6 +35,11 @@ class GuiSettings:
     only_loaded: bool = False
     run_analysis: bool = False
     attach: bool = True
+
+    # Output unit system ("model" = the active model's own present units,
+    # read live via EtabsSession.get_present_units(); no conversion applied).
+    force_unit: str = "model"
+    length_unit: str = "model"
 
     # Extraction mode ("base" reactions vs "frame" forces) + frame selectors
     extract_mode: str = "base"
@@ -47,8 +58,11 @@ class GuiSettings:
     label_fontsize: float = 2.4
     x_offset: float = 1.0
     y_offset: float = 1.0
-    units: str = "model"
+    units: str = "data"
     format: str = "png"
+
+    # Plot-only output directory (CSV tab); blank = the CSV's own parent dir.
+    plot_output_dir: str = ""
 
     # Derived/parsed values (populated by service.py)
     parsed_combos: list[str] = field(default_factory=list)
@@ -63,8 +77,18 @@ FORMATS: tuple[str, ...] = ("png", "pdf", "svg")
 # Accepted extraction modes for the GUI mode switch.
 MODE_CHOICES: tuple[str, ...] = ("base", "frame")
 
-# Accepted unit systems for the GUI dropdown (must match plots.UNITS keys).
-UNITS_CHOICES: tuple[str, ...] = ("model", "kN-m")
+# Accepted plot display-unit choices for the GUI dropdown ("data" displays
+# the extraction's own units unconverted; the rest are named presets from
+# plots.UNITS plus the plots.py-recognized "<force>-<length>" strings).
+UNITS_CHOICES: tuple[str, ...] = ("data", "kN-m", "kN-mm", "N-mm", "tonf-m", "kgf-m")
+
+# Accepted output force/length unit choices for extraction (GUI + CLI);
+# "model" means "use the active model's own present units, no conversion".
+FORCE_UNIT_CHOICES: tuple[str, ...] = FORCE_CHOICES
+LENGTH_UNIT_CHOICES: tuple[str, ...] = LENGTH_CHOICES
+
+# Accepted appearance modes for the GUI's theme switch.
+APPEARANCE_CHOICES: tuple[str, ...] = ("System", "Light", "Dark")
 
 
 def parse_combos(raw: str) -> list[str]:
@@ -86,12 +110,19 @@ def parse_elevation(raw: str) -> float | None:
     """Parse an optional elevation value from a text field.
 
     Empty/whitespace returns ``None`` (no filter); invalid text raises
-    ``ValueError`` so the GUI can surface a clear message.
+    ``ValueError`` so the GUI can surface a clear message.  Tolerates the
+    elevation combobox's labelled entries (e.g. ``"-18.55  (Base, 42 pts)"``,
+    as populated by ``app._on_check_done``) by taking the leading numeric
+    token and ignoring the trailing ``(...)`` label.
     """
     if raw is None or not raw.strip():
         return None
+    text = raw.strip()
+    match = re.match(r"^[+-]?\d+(?:\.\d+)?", text)
+    if not match:
+        raise ValueError(f"Invalid elevation value: {raw!r}")
     try:
-        return float(raw.strip())
+        return float(match.group(0))
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Invalid elevation value: {raw!r}") from exc
 

@@ -8,81 +8,80 @@ font size, units, format) into a group of widgets, and exposes
 
 from __future__ import annotations
 
-import tkinter as tk
-from tkinter import ttk
+import customtkinter as ctk
 
 from etabs_extractor.gui.state import FORMATS, UNITS_CHOICES, GuiSettings
+from etabs_extractor.gui.widgets.fields import Section
 
 
-class PlotSettingsFrame(ttk.LabelFrame):
-    """A labelled frame hosting all plot-appearance controls."""
+class PlotSettingsFrame(Section):
+    """A titled card hosting all plot-appearance controls."""
 
     def __init__(self, master, settings: GuiSettings | None = None) -> None:
-        super().__init__(master, text="Plot appearance")
+        super().__init__(master, "Plot appearance")
         self._settings = settings or GuiSettings()
 
-        self.grid_columnconfigure(1, weight=1)
+        body = self.body
+        body.grid_columnconfigure(1, weight=1)
 
         # Dynamic size checkbox.
-        self.dynamic_var = tk.BooleanVar(value=self._settings.dynamic_size)
-        self.dynamic_cb = ttk.Checkbutton(
-            self, text="Dynamic resolution (figure follows data)",
+        self.dynamic_var = ctk.BooleanVar(value=self._settings.dynamic_size)
+        self.dynamic_cb = ctk.CTkCheckBox(
+            body, text="Dynamic resolution (figure follows data)",
             variable=self.dynamic_var, command=self._sync_dim_enabled,
         )
-        self.dynamic_cb.grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=2)
+        self.dynamic_cb.grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=(2, 6))
 
         # Fixed width / height (inches), disabled while dynamic.
-        self.width_var = tk.StringVar(value=str(self._settings.fig_width))
-        self.height_var = tk.StringVar(value=str(self._settings.fig_height))
-        self.width_entry = ttk.Entry(self, textvariable=self.width_var, width=10)
-        self.height_entry = ttk.Entry(self, textvariable=self.height_var, width=10)
-        ttk.Label(self, text="Width (in)").grid(row=1, column=0, sticky="e", padx=(8, 2))
-        self.width_entry.grid(row=1, column=1, sticky="w", padx=2)
-        ttk.Label(self, text="Height (in)").grid(row=2, column=0, sticky="e", padx=(8, 2))
-        self.height_entry.grid(row=2, column=1, sticky="w", padx=2)
+        self.width_var = ctk.StringVar(value=str(self._settings.fig_width))
+        self.height_var = ctk.StringVar(value=str(self._settings.fig_height))
+        self.width_entry = ctk.CTkEntry(body, textvariable=self.width_var, width=90)
+        self.height_entry = ctk.CTkEntry(body, textvariable=self.height_var, width=90)
+        ctk.CTkLabel(body, text="Width (in)", anchor="e", width=100).grid(row=1, column=0, sticky="e", padx=(8, 2), pady=2)
+        self.width_entry.grid(row=1, column=1, sticky="w", padx=2, pady=2)
+        ctk.CTkLabel(body, text="Height (in)", anchor="e", width=100).grid(row=2, column=0, sticky="e", padx=(8, 2), pady=2)
+        self.height_entry.grid(row=2, column=1, sticky="w", padx=2, pady=2)
 
         # DPI.
-        self.dpi_var = tk.StringVar(value=str(self._settings.dpi))
-        ttk.Label(self, text="DPI").grid(row=3, column=0, sticky="e", padx=(8, 2))
-        self.dpi_entry = ttk.Entry(self, textvariable=self.dpi_var, width=10)
-        self.dpi_entry.grid(row=3, column=1, sticky="w", padx=2)
+        self.dpi_var = ctk.StringVar(value=str(self._settings.dpi))
+        ctk.CTkLabel(body, text="DPI", anchor="e", width=100).grid(row=3, column=0, sticky="e", padx=(8, 2), pady=2)
+        self.dpi_entry = ctk.CTkEntry(body, textvariable=self.dpi_var, width=90)
+        self.dpi_entry.grid(row=3, column=1, sticky="w", padx=2, pady=2)
 
         # Label font size.
-        self.label_font_var = tk.StringVar(value=str(self._settings.label_fontsize))
-        ttk.Label(self, text="Label font").grid(row=4, column=0, sticky="e", padx=(8, 2))
-        self.label_font_entry = ttk.Entry(self, textvariable=self.label_font_var, width=10)
-        self.label_font_entry.grid(row=4, column=1, sticky="w", padx=2)
+        self.label_font_var = ctk.StringVar(value=str(self._settings.label_fontsize))
+        ctk.CTkLabel(body, text="Label font", anchor="e", width=100).grid(row=4, column=0, sticky="e", padx=(8, 2), pady=2)
+        self.label_font_entry = ctk.CTkEntry(body, textvariable=self.label_font_var, width=90)
+        self.label_font_entry.grid(row=4, column=1, sticky="w", padx=2, pady=2)
 
         # X / Y offset padding (inches).  Extra room added to the axis limits
         # (xlim/ylim) on each side, on top of the normal auto margins, so edge
         # point labels render INSIDE the axes box instead of the box border
         # cutting through them.  The canvas size is unchanged.
-        self.x_offset_var = tk.StringVar(value=str(self._settings.x_offset))
-        self.y_offset_var = tk.StringVar(value=str(self._settings.y_offset))
-        ttk.Label(self, text="X offset (in)").grid(row=5, column=0, sticky="e", padx=(8, 2))
-        self.x_offset_entry = ttk.Entry(self, textvariable=self.x_offset_var, width=10)
-        self.x_offset_entry.grid(row=5, column=1, sticky="w", padx=2)
-        ttk.Label(self, text="Y offset (in)").grid(row=6, column=0, sticky="e", padx=(8, 2))
-        self.y_offset_entry = ttk.Entry(self, textvariable=self.y_offset_var, width=10)
-        self.y_offset_entry.grid(row=6, column=1, sticky="w", padx=2)
+        self.x_offset_var = ctk.StringVar(value=str(self._settings.x_offset))
+        self.y_offset_var = ctk.StringVar(value=str(self._settings.y_offset))
+        ctk.CTkLabel(body, text="X offset (in)", anchor="e", width=100).grid(row=5, column=0, sticky="e", padx=(8, 2), pady=2)
+        self.x_offset_entry = ctk.CTkEntry(body, textvariable=self.x_offset_var, width=90)
+        self.x_offset_entry.grid(row=5, column=1, sticky="w", padx=2, pady=2)
+        ctk.CTkLabel(body, text="Y offset (in)", anchor="e", width=100).grid(row=6, column=0, sticky="e", padx=(8, 2), pady=2)
+        self.y_offset_entry = ctk.CTkEntry(body, textvariable=self.y_offset_var, width=90)
+        self.y_offset_entry.grid(row=6, column=1, sticky="w", padx=2, pady=2)
 
         # Units dropdown.
-        ttk.Label(self, text="Units").grid(row=7, column=0, sticky="e", padx=(8, 2))
-        self.units_var = tk.StringVar(value=self._settings.units)
-        self.units_combo = ttk.Combobox(
-            self, textvariable=self.units_var, values=list(UNITS_CHOICES),
-            state="readonly", width=9,
+        ctk.CTkLabel(body, text="Units", anchor="e", width=100).grid(row=7, column=0, sticky="e", padx=(8, 2), pady=2)
+        self.units_var = ctk.StringVar(value=self._settings.units)
+        self.units_menu = ctk.CTkOptionMenu(
+            body, values=list(UNITS_CHOICES), variable=self.units_var, width=90,
         )
-        self.units_combo.grid(row=7, column=1, sticky="w", padx=2)
+        self.units_menu.grid(row=7, column=1, sticky="w", padx=2, pady=2)
 
         # Format dropdown.
-        ttk.Label(self, text="Format").grid(row=8, column=0, sticky="e", padx=(8, 2))
-        self.format_var = tk.StringVar(value=self._settings.format)
-        self.format_combo = ttk.Combobox(
-            self, textvariable=self.format_var, values=list(FORMATS),
-            state="readonly", width=9,
+        ctk.CTkLabel(body, text="Format", anchor="e", width=100).grid(row=8, column=0, sticky="e", padx=(8, 2), pady=2)
+        self.format_var = ctk.StringVar(value=self._settings.format)
+        self.format_menu = ctk.CTkOptionMenu(
+            body, values=list(FORMATS), variable=self.format_var, width=90,
         )
-        self.format_combo.grid(row=8, column=1, sticky="w", padx=2)
+        self.format_menu.grid(row=8, column=1, sticky="w", padx=2, pady=2)
 
         self._sync_dim_enabled()
 

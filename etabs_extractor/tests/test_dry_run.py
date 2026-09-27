@@ -303,6 +303,27 @@ class _FakeSession(_extractor_connection.EtabsSession):
         c = self.sap_model.PointObj.coords.get(point, (None, None, None))
         return (c[0], c[1], c[2])
 
+    def get_present_units(self):
+        """Fake model present units: N / mm — matches this project's
+        historical hardcoded assumption (``units.LEGACY_FRAME``), so the
+        default ``force_unit="model"``/``length_unit="model"`` extraction
+        applies no scaling and every pre-existing raw-value assertion below
+        stays meaningful."""
+        from etabs_extractor.units import UnitSystem
+
+        return UnitSystem("N", "mm")
+
+    def get_story_elevations(self):
+        """Fake story table: a base elevation plus two named stories, used
+        to exercise ``results.list_elevations()`` labelling."""
+        return {"base": -5000.0, "stories": [("L1", 0.0), ("L2", 3000.0)]}
+
+    def get_all_point_coords(self):
+        return {
+            name: self.sap_model.PointObj.coords.get(name, (None, None, None))
+            for name in self.sap_model.PointObj.names
+        }
+
     def setup_select_loads(self, combos, cases):
         """Mirror ``setup_select_loads`` on the real session: deselect once,
         then select both combos and cases together."""
@@ -483,7 +504,14 @@ def run():
             "P", "V2", "V3", "T", "M2", "M3",
             "length_mm",
             "obj_sta", "elm", "elm_sta",
+            "force_unit", "length_unit",
         ], f"column order mismatch: {list(df.columns)}"
+
+        # Default force_unit/length_unit="model": the fake model's own present
+        # units (N, mm — see _FakeSession.get_present_units) pass through
+        # unconverted, so every raw fixture value below stays meaningful.
+        assert set(df["force_unit"].unique()) == {"N"}, df["force_unit"].unique()
+        assert set(df["length_unit"].unique()) == {"mm"}, df["length_unit"].unique()
 
         # Combos-only by default: every row must be load_kind COMBO.
         assert set(df["load_kind"].unique()) == {"COMBO"}, df["load_kind"].unique()
@@ -601,6 +629,10 @@ def run():
         # Combos-only by default: every row must be load_kind COMBO.
         assert set(bdf["load_kind"].unique()) == {"COMBO"}, bdf["load_kind"].unique()
 
+        # Default force_unit/length_unit="model": no conversion (see above).
+        assert set(bdf["force_unit"].unique()) == {"N"}, bdf["force_unit"].unique()
+        assert set(bdf["length_unit"].unique()) == {"mm"}, bdf["length_unit"].unique()
+
         # x/y/z present and populated (coordinates attached).
         for c in ("x", "y", "z"):
             assert c in bdf.columns, c
@@ -659,11 +691,12 @@ def run():
             set(asd_min["step_type"].unique())
         assert set(asd_max["step_type"].unique()) == {"Max"}, \
             set(asd_max["step_type"].unique())
-        # Split content sanity: point 1's ASD 1 Min row carries F3=200 (N)
-        # -> 0.200 kN after the N->kN conversion.
+        # Split content sanity: point 1's ASD 1 Min row carries F3=200 (N),
+        # and the default force_unit="model" applies no conversion (the fake
+        # model's own present units, N/mm, pass through unconverted).
         pt1_min = asd_min[asd_min["point"].astype(str) == "1"]
         assert len(pt1_min) == 1, pt1_min
-        assert abs(float(pt1_min.iloc[0]["F3"]) - 0.200) < 1e-9
+        assert abs(float(pt1_min.iloc[0]["F3"]) - 200.0) < 1e-9
         # The consolidated CSV distinguishes Max/Min rows (plain loads have an
         # empty step, read back by pandas as NaN).
         step_vals = set(bcsv["step_type"].fillna("").astype(str).unique())
@@ -681,23 +714,27 @@ def run():
         from etabs_extractor.models import BASE_FORCE_COLS
         benv_min = pd.read_csv(out / "base_envelope_min.csv", encoding="utf-8")
         benv_max = pd.read_csv(out / "base_envelope_max.csv", encoding="utf-8")
+        unit_cols = ["force_unit", "length_unit"]
         assert list(benv_min.columns) == (["point", "load_name"] +
-                                          [f"{c}_min" for c in BASE_FORCE_COLS]), \
+                                          [f"{c}_min" for c in BASE_FORCE_COLS] +
+                                          unit_cols), \
             list(benv_min.columns)
         assert list(benv_max.columns) == (["point", "load_name"] +
-                                          [f"{c}_max" for c in BASE_FORCE_COLS]), \
+                                          [f"{c}_max" for c in BASE_FORCE_COLS] +
+                                          unit_cols), \
             list(benv_max.columns)
         # For a known synthetic point/load verify min/max semantics.  Point 1
         # with ASD 1 has (F1,F2,F3)=(10,2,120) and LRFD 1 has (15,3,180)
-        # (source N), so after conversion to kN the combined 1/load_name
-        # group min/max per component must match the ÷1000 values.
+        # (source N); default force_unit="model" applies no conversion, so
+        # the combined 1/load_name group min/max per component match the raw
+        # fixture values directly.
         pt1_asd = benv_min[(benv_min["point"].astype(str) == "1") &
                            (benv_min["load_name"] == "ASD 1")]
         assert len(pt1_asd) == 1, pt1_asd
-        assert pt1_asd.iloc[0]["F3_min"] == 0.120
+        assert pt1_asd.iloc[0]["F3_min"] == 120.0
         pt1_all = benv_max[benv_max["point"].astype(str) == "1"]
-        # Across ASD 1 (F3=120) and LRFD 1 (F3=180): max F3 in kN is 0.180.
-        assert pt1_all["F3_max"].max() >= 0.180
+        # Across ASD 1 (F3=120) and LRFD 1 (F3=180): max F3 (unconverted) is 180.
+        assert pt1_all["F3_max"].max() >= 180.0
 
         # Base case-stream: a plain case load -> base_case_Dead.csv with NO
         # split files (no Max/Min steps in the data).  Runs AFTER the envelope
@@ -809,6 +846,65 @@ def run():
         expected_ol = [r for r in brecs if r.point != "4"]
         assert len(brecs_ol) == len(expected_ol), (len(brecs_ol), len(expected_ol))
 
+        # ---- Model-aware units: explicit conversion + elevation inventory ----
+        # Requesting kN/m output against the fake's native N/mm model must
+        # scale every force/moment/coordinate value and stamp the requested
+        # unit onto every row.
+        bdf_knm, _bper_knm, brecs_knm = extract_base_reactions(
+            "synthetic_model.$et", None,
+            session=session, force_unit="kN", length_unit="m",
+        )
+        assert set(bdf_knm["force_unit"].unique()) == {"kN"}, bdf_knm["force_unit"].unique()
+        assert set(bdf_knm["length_unit"].unique()) == {"m"}, bdf_knm["length_unit"].unique()
+        pt1_min_knm = bdf_knm[(bdf_knm["point"].astype(str) == "1") &
+                              (bdf_knm["load_name"] == "ASD 1") &
+                              (bdf_knm["step_type"] == "Min")]
+        assert len(pt1_min_knm) == 1, pt1_min_knm
+        # F3=200 N -> 0.200 kN.
+        assert abs(float(pt1_min_knm.iloc[0]["F3"]) - 0.200) < 1e-9
+        # M2=-2.0 N·mm -> -2e-6 kN·m.
+        assert abs(float(pt1_min_knm.iloc[0]["M2"]) - (-2.0e-6)) < 1e-12
+        # Point 3's z=3000mm -> 3.0m.
+        pt3_knm = bdf_knm[bdf_knm["point"].astype(str) == "3"]
+        assert abs(float(pt3_knm.iloc[0]["z"]) - 3.0) < 1e-9
+
+        # Frame-side conversion too: P/station/length_mm all scale.
+        fdf_knm, _fper_knm, _frecs_knm = extract_forces(
+            "synthetic_model.$et", None,
+            session=session, force_unit="kN", length_unit="m",
+        )
+        assert set(fdf_knm["force_unit"].unique()) == {"kN"}, fdf_knm["force_unit"].unique()
+        assert set(fdf_knm["length_unit"].unique()) == {"m"}, fdf_knm["length_unit"].unique()
+        b1_row = fdf_knm[(fdf_knm["frame"] == "B1") & (fdf_knm["load_name"] == "ASD 1") &
+                         (fdf_knm["station"].abs() < 1e-9)]
+        assert len(b1_row) == 1, b1_row
+        # P=-10 N -> -0.01 kN.
+        assert abs(float(b1_row.iloc[0]["P"]) - (-0.01)) < 1e-9
+        # The fake's fixed 5000mm frame length -> 5.0m.
+        assert abs(float(b1_row.iloc[0]["length_mm"]) - 5.0) < 1e-9
+
+        # Elevation filter in output length units: 3.0 (m) must match the
+        # same point ("3") as the model-unit 3000.0 (mm) filter above.
+        bdf3_m, _bper3_m, brecs3_m = extract_base_reactions(
+            "synthetic_model.$et", None,
+            session=session, elevation=3.0, length_unit="m",
+        )
+        assert {r.point for r in brecs3_m} == {"3"}, {r.point for r in brecs3_m}
+        assert len(brecs3_m) == len(brecs3), (len(brecs3_m), len(brecs3))
+
+        # Model elevation inventory: labelled by the fake story table
+        # (base=-5000mm "Base", story L2=3000mm) and grouped by point z.
+        from etabs_extractor.results import list_elevations
+
+        elevs = list_elevations(session)
+        by_z = {round(e["z"], 3): e for e in elevs}
+        assert by_z[-5000.0]["label"] == "Base", by_z[-5000.0]
+        assert by_z[-5000.0]["n_points"] == 1, by_z[-5000.0]  # point "4"
+        assert by_z[3000.0]["label"] == "L2", by_z[3000.0]
+        assert by_z[3000.0]["n_points"] == 1, by_z[3000.0]  # point "3"
+        assert by_z[0.0]["label"] == "L1", by_z[0.0]  # matches the L1 story
+        assert by_z[0.0]["n_points"] == 2, by_z[0.0]  # points "1", "2"
+
         # ---- Plot path (headless, no COM) -----------------------------------
         from etabs_extractor.plots import (
             DEFAULT_COMPONENTS,
@@ -819,16 +915,23 @@ def run():
         # Default components are exactly Fz, M2, M3 (Fx/Fy omitted).
         assert DEFAULT_COMPONENTS == ("Fz", "M2", "M3"), DEFAULT_COMPONENTS
 
-        # Unit conversion: base reactions are exported in kN/kN·m, so in BOTH
-        # unit systems force/moment scale is identity (1.0); only the
-        # coordinate length_scale differs (mm vs m).
-        from etabs_extractor.plots import UNITS
-        assert UNITS["kN-m"]["force_scale"] == 1.0
-        assert UNITS["kN-m"]["moment_scale"] == 1.0
-        assert UNITS["kN-m"]["length_scale"] == 1000.0
-        assert UNITS["model"]["force_scale"] == 1.0
-        assert UNITS["model"]["moment_scale"] == 1.0
-        assert UNITS["model"]["length_scale"] == 1.0
+        # Unit conversion: bdf carries its own force_unit/length_unit ("N",
+        # "mm" — the fake model's native units).  "model"/"data" resolves to
+        # those source units unconverted (scale 1.0); "kN-m" resolves the
+        # actual N/mm -> kN/m conversion factors.
+        from etabs_extractor.plots import _resolve_units, UNITS
+
+        data_def = _resolve_units("model", bdf)
+        assert data_def["force"] == "N" and data_def["length"] == "mm", data_def
+        assert data_def["force_scale"] == 1.0
+        assert data_def["moment_scale"] == 1.0
+        assert data_def["length_scale"] == 1.0
+
+        knm_def = _resolve_units("kN-m", bdf)
+        assert knm_def["force"] == "kN" and knm_def["length"] == "m", knm_def
+        assert abs(knm_def["force_scale"] - 1000.0) < 1e-9      # N -> kN
+        assert abs(knm_def["moment_scale"] - 1.0e6) < 1e-9      # N·mm -> kN·m
+        assert abs(knm_def["length_scale"] - 1000.0) < 1e-9     # mm -> m
 
         # Plot with kN/m units; still one figure per load, files non-empty.
         plot_paths_knm = plot_base_reactions(bdf, out, units="kN-m")
@@ -927,20 +1030,22 @@ def run():
         assert str(first["point"]) == "7", first["point"]
 
         # Label formatting: the first line is the bare point name.
-        from etabs_extractor.plots import _format_label, UNITS
-        label = _format_label(agg.iloc[0], ("Fz", "M2", "M3"), UNITS["model"])
+        from etabs_extractor.plots import _format_label
+        label = _format_label(agg.iloc[0], ("Fz", "M2", "M3"), _resolve_units("model", bdf))
         label_lines = label.split("\n")
         assert label_lines[0] == "7", label_lines
-        # Units: base reactions are exported in kN/kN·m, so labels under BOTH
-        # unit systems carry "kN" / "kN·m" (model => coords mm).
-        for system in ("model", "kN-m"):
-            lbl = _format_label(agg.iloc[0], ("Fz", "M2", "M3"), UNITS[system])
-            assert "kN" in lbl, (system, lbl)
-            assert "kN·m" in lbl, (system, lbl)
+        # Units: "model" shows the source data's own units (N/N·mm, the fake
+        # model's native units); "kN-m" converts to kN/kN·m.
+        for system, exp_force, exp_moment in (
+            ("model", "N", "N·mm"), ("kN-m", "kN", "kN·m"),
+        ):
+            lbl = _format_label(agg.iloc[0], ("Fz", "M2", "M3"), _resolve_units(system, bdf))
+            assert exp_force in lbl, (system, lbl)
+            assert exp_moment in lbl, (system, lbl)
         # A null point name is omitted defensively (no blank first line).
         null_label = _format_label(
             {"point": None, "F3": 1.0, "M2": 0.0, "M3": 0.0},
-            ("Fz",), UNITS["model"],
+            ("Fz",), _resolve_units("model", bdf),
         )
         assert null_label.split("\n")[0].startswith("Fz="), null_label
 
