@@ -11,11 +11,20 @@ requires a display; importing the module does not.
 from __future__ import annotations
 
 import queue
-
-import customtkinter as ctk
 from tkinter import messagebox
 
+import customtkinter as ctk
+
 from etabs_extractor.config import resolve_output_dir
+from etabs_extractor.gui.runner import BackgroundRunner
+from etabs_extractor.gui.service import (
+    build_elevation_labels,
+    build_figure_kwargs,
+    do_extract,
+    inspect_active_model,
+    load_from_csv,
+    save_batch_plots,
+)
 from etabs_extractor.gui.state import (
     APPEARANCE_CHOICES,
     FORCE_UNIT_CHOICES,
@@ -23,19 +32,20 @@ from etabs_extractor.gui.state import (
     GuiSettings,
     parse_elevation,
 )
-from etabs_extractor.gui.service import (
-    build_elevation_labels,
-    build_figure_kwargs,
-    do_extract,
-    inspect_active_model,
-    load_from_csv,
+from etabs_extractor.gui.widgets.fields import (
+    DirectoryField,
+    FileField,
+    LabeledEntry,
+    Section,
 )
-from etabs_extractor.gui.runner import BackgroundRunner
-from etabs_extractor.gui.widgets.fields import DirectoryField, FileField, LabeledEntry, Section
 from etabs_extractor.gui.widgets.load_selection import LoadSelectionField
 from etabs_extractor.gui.widgets.log_panel import LogPanel
 from etabs_extractor.gui.widgets.plot_settings import PlotSettingsFrame
-from etabs_extractor.gui.widgets.preview import BasePreviewPanel, FramePreviewPanel, load_beam_viewer
+from etabs_extractor.gui.widgets.preview import (
+    BasePreviewPanel,
+    FramePreviewPanel,
+    load_beam_viewer,
+)
 
 
 class EtabsExtractorApp(ctk.CTk):
@@ -118,6 +128,15 @@ class EtabsExtractorApp(ctk.CTk):
             model_section.body, "Output dir", str(resolve_output_dir()),
         )
         self.output_field.pack(fill="x", pady=3)
+        self.batch_plot_field = DirectoryField(
+            model_section.body, "Batch plot dir", "",
+        )
+        self.batch_plot_field.pack(fill="x", pady=3)
+        ctk.CTkLabel(
+            model_section.body,
+            text="(blank: extraction → Output dir; CSV → Plot output / CSV folder)",
+            text_color="gray", anchor="w", wraplength=280, justify="left",
+        ).pack(fill="x")  # batch-save fallback target, see service.save_batch_plots
         self.tag_field = LabeledEntry(model_section.body, "Tag", "")
         self.tag_field.pack(fill="x", pady=3)
         self.tag_hint_var = ctk.StringVar(value="")
@@ -249,6 +268,7 @@ class EtabsExtractorApp(ctk.CTk):
         self.base_preview = BasePreviewPanel(
             preview_tab, settings_provider=self._collect_settings,
             figure_builder=self._build_preview_figure, log=self._set_log,
+            batch_saver=self._on_batch_save,
         )
         self.frame_preview = FramePreviewPanel(
             preview_tab, figure_builder=self._build_frame_preview_figure,
@@ -376,6 +396,7 @@ class EtabsExtractorApp(ctk.CTk):
         s = GuiSettings()
         s.model_path = self.model_field.get()
         s.output_dir = self.output_field.get()
+        s.batch_plot_dir = self.batch_plot_field.get()
         s.tag = self.tag_field.get()
         s.extract_mode = self.mode_var.get()
         s.selected_combos, s.selected_cases = self.load_field.get_selected()
@@ -479,6 +500,24 @@ class EtabsExtractorApp(ctk.CTk):
         self._set_log(f"Loaded CSV with {rows} row(s) across {len(load_names)} load(s).")
         self._refresh_preview()
 
+    def _on_batch_save(self, settings: GuiSettings) -> None:
+        """Batch-save absmax/max/min plots for every load of the current
+        result (BasePreviewPanel's Batch save plots button), on the
+        background thread like every other job."""
+        if self._result is None:
+            messagebox.showwarning(
+                "Batch save plots", "Run Extract or Load preview first."
+            )
+            return
+        self._settings = settings
+        self._set_log("Saving batch plots...")
+        self._start_job(save_batch_plots, self._result, settings)
+        self._pending_cb = self._on_batch_done
+
+    def _on_batch_done(self, paths: list) -> None:
+        target = str(paths[0].parent) if paths else "?"
+        self._set_log(f"Saved {len(paths)} plot(s) to {target}")
+
     def _refresh_preview(self) -> None:
         if self._result is None:
             return
@@ -489,11 +528,13 @@ class EtabsExtractorApp(ctk.CTk):
         self.tabs.set("Preview")
 
     # ------------------------------------------------------------- preview figures
-    def _build_preview_figure(self, df, load_name, settings):
+    def _build_preview_figure(self, df, load_name, settings, step=None):
         """Build one base-reaction preview figure via the shared plots layer."""
         from etabs_extractor.plots import build_base_reactions_figure
 
-        return build_base_reactions_figure(df, load_name, **build_figure_kwargs(settings))
+        return build_base_reactions_figure(
+            df, load_name, **build_figure_kwargs(settings), step=step,
+        )
 
     def _build_frame_preview_figure(self, df, frame, load_name, section, *, step_type=None):
         """Build a 3-panel beam force diagram figure (P, V2, M3)."""
@@ -553,7 +594,7 @@ class EtabsExtractorApp(ctk.CTk):
         if self._poll_id is not None:
             try:
                 self.after_cancel(self._poll_id)
-            except Exception:  # noqa: BLE001 - best-effort cleanup on close
-                pass
+            except Exception as exc:  # noqa: BLE001 - best-effort cleanup on close
+                self._set_log(f"Cleanup on close: {exc}")
             self._poll_id = None
         super().destroy()

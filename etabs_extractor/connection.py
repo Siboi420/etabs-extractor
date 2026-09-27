@@ -76,7 +76,9 @@ def _c_helper(comtypes):
         # Not generated yet — fall through and generate below.
         pass
 
-    from comtypes.client import GetModule  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+    from comtypes.client import (
+        GetModule,  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+    )
 
     GetModule(DEFAULT_COM_PROGID)  # "ETABSv1.Helper"
     et = importlib.import_module("comtypes.gen.ETABSv1")
@@ -90,7 +92,9 @@ def _ensure_comtypes_wrapper_available() -> None:
     progid = _etabs_progid()
     try:
         # Register the type library in comtypes' generated cache.
-        from comtypes.client import GetModule  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+        from comtypes.client import (
+            GetModule,  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+        )
 
         GetModule(progid)
     except Exception:  # noqa: BLE001  pragma: no cover

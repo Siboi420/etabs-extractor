@@ -23,16 +23,21 @@ from __future__ import annotations
 
 import os
 import sys
-
-import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from typing import TYPE_CHECKING
+
+import customtkinter as ctk
+
+from etabs_extractor.gui.state import STEP_CHOICES
 
 if TYPE_CHECKING:
     import pandas as pd
 
 _NOTE = "Select a load to preview (or run Extract/Load preview)."
+
+# Dropdown label -> plots.STEP_VARIANTS entry.
+_STEP_VARIANT = {"Abs max": "absmax", "Max": "max", "Min": "min"}
 
 
 def load_beam_viewer():
@@ -43,7 +48,7 @@ def load_beam_viewer():
     )
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
-    import beam_viewer  # noqa: PLC0415
+    import beam_viewer
 
     return beam_viewer
 
@@ -87,8 +92,8 @@ class PlotCanvas(tk.Frame):
             return self._mpl_canvas
         import matplotlib
         matplotlib.use("TkAgg")
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
         from matplotlib.backends.backend_tkagg import (
+            FigureCanvasTkAgg,
             NavigationToolbar2Tk,  # type: ignore[reportPrivateImportUsage]
         )
         from matplotlib.figure import Figure
@@ -139,15 +144,22 @@ class BasePreviewPanel(ctk.CTkFrame):
 
     * ``settings_provider`` — ``() -> GuiSettings``, used to build figure
       kwargs and read the save dpi/format.
-    * ``figure_builder`` — ``(df, load_name, settings) ->
+    * ``figure_builder`` — ``(df, load_name, settings, *, step) ->
       matplotlib.Figure | None`` (the :func:`build_base_reactions_figure`
       call, kept in the app so this widget stays pure view).
+    * ``batch_saver`` — ``(settings) -> None`` (the app's
+      :func:`~etabs_extractor.gui.service.save_batch_plots` background-job
+      entry point).  Optional; the Batch save button is inert without it.
     """
 
-    def __init__(self, master, *, settings_provider, figure_builder, log=None) -> None:
+    def __init__(
+        self, master, *, settings_provider, figure_builder, log=None,
+        batch_saver=None,
+    ) -> None:
         super().__init__(master, fg_color="transparent")
         self._settings_provider = settings_provider
         self._figure_builder = figure_builder
+        self._batch_saver = batch_saver
         self._log = log
         self._result: dict = {}
         self._per_load: dict = {}
@@ -162,8 +174,19 @@ class BasePreviewPanel(ctk.CTkFrame):
             command=lambda _v: self._render_current(),
         )
         self.load_menu.pack(side="left", padx=6)
+        ctk.CTkLabel(top, text="Step:").pack(side="left")
+        self.step_var = ctk.StringVar(value=STEP_CHOICES[0])
+        self.step_menu = ctk.CTkOptionMenu(
+            top, values=list(STEP_CHOICES), variable=self.step_var, width=90,
+            command=lambda _v: self._render_current(),
+        )
+        self.step_menu.pack(side="left", padx=6)
         ctk.CTkButton(top, text="Refresh", command=self._refresh_settings, width=80).pack(side="left", padx=4)
         ctk.CTkButton(top, text="Save image...", command=self._save_preview, width=100).pack(side="left", padx=4)
+        self.batch_btn = ctk.CTkButton(
+            top, text="Batch save plots...", command=self._batch_save, width=140,
+        )
+        self.batch_btn.pack(side="left", padx=4)
 
         self.preview = PlotCanvas(self)
         self.preview.pack(fill="both", expand=True)
@@ -195,8 +218,18 @@ class BasePreviewPanel(ctk.CTkFrame):
         if not load_name or df is None:
             return
         settings = self._settings_provider()
+        step = _STEP_VARIANT.get(self.step_var.get(), "absmax")
         try:
-            fig = self._figure_builder(df, load_name, settings)
+            fig = self._figure_builder(df, load_name, settings, step=step)
+            if fig is None and step != "absmax":
+                # No Max/Min rows for this load (plain case / legacy CSV):
+                # fall back to the abs-max view instead of an empty canvas.
+                if self._log:
+                    self._log(
+                        f"No {self.step_var.get()} steps for {load_name} — "
+                        "showing abs max."
+                    )
+                fig = self._figure_builder(df, load_name, settings, step="absmax")
         except ImportError as exc:
             msg = f"Preview needs matplotlib: {exc}."
             if self._log:
@@ -213,12 +246,27 @@ class BasePreviewPanel(ctk.CTkFrame):
             self._current_fig = fig
             self.preview.set_figure(fig)
             if self._log:
-                self._log(f"Previewing {load_name} ({len(df)} points).")
+                step_note = "" if step == "absmax" else f" [{step}]"
+                self._log(f"Previewing {load_name}{step_note} ({len(df)} points).")
         else:
             self._current_fig = None
             self.preview.clear()
             if self._log:
                 self._log(f"No plottable points for {load_name}.")
+
+    # ---------------------------------------------------------------- batch
+    def _batch_save(self) -> None:
+        """Hand the current settings to the app's batch-saver (background job
+        writing absmax/max/min plots for every load into the Batch plot dir)."""
+        if not self._result:
+            messagebox.showwarning(
+                "Batch save plots", "Run Extract or Load preview first (no result loaded)."
+            )
+            return
+        if self._batch_saver is None:
+            messagebox.showinfo("Batch save plots", "Batch saving is not configured.")
+            return
+        self._batch_saver(self._settings_provider())
 
     # ---------------------------------------------------------------- save
     def _save_preview(self) -> None:
@@ -259,7 +307,7 @@ class FramePreviewPanel(ctk.CTkFrame):
         self._figure_builder = figure_builder
         self._batch_figure_builder = batch_figure_builder
         self._log = log
-        self._df: "pd.DataFrame | None" = None
+        self._df: pd.DataFrame | None = None
         self._current_fig = None
         self._length_map: dict[str, float] = {}
 
@@ -345,7 +393,7 @@ class FramePreviewPanel(ctk.CTkFrame):
         label = self.force_var.get()
         return {"Moment (M3)": "M3", "Shear (V2)": "V2", "Axial (P)": "P"}.get(label, "M3")
 
-    def _get_highest_frame(self) -> "int | str | None":
+    def _get_highest_frame(self) -> int | str | None:
         """Return the frame with the highest |force_col| at the current
         selection, or None if no data."""
         section = self.section_var.get()
@@ -369,8 +417,8 @@ class FramePreviewPanel(ctk.CTkFrame):
         bv = load_beam_viewer()
         lengths = bv.get_lengths_for_section(self._df, section)
         lf = bv._length_scale(bv._data_units(self._df))
-        labels = [f"{l * lf:.2f}m" for l in lengths]
-        self._length_map = dict(zip(labels, lengths))
+        labels = [f"{length * lf:.2f}m" for length in lengths]
+        self._length_map = dict(zip(labels, lengths, strict=True))
         self.length_menu.configure(values=labels)
 
     # ------------------------------------------------------------ callbacks

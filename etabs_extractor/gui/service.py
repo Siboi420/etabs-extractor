@@ -10,6 +10,8 @@ Python) and keeps all real work in the existing ``models`` / ``results`` /
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from etabs_extractor.gui.state import (
     GuiSettings,
     parse_elevation,
@@ -191,7 +193,7 @@ def load_from_csv(settings: GuiSettings) -> dict:
     the CSV (and ``records`` empty), so the caller can treat both sources
     uniformly for previewing/plotting.
     """
-    import pandas as pd  # noqa: PLC0415
+    import pandas as pd
 
     csv_path = (settings.csv_path or "").strip()
     if not csv_path:
@@ -222,6 +224,43 @@ def load_from_csv(settings: GuiSettings) -> dict:
         "load_names": list(per_load.keys()),
         "plot_paths": plot_paths,
     }
+
+
+def save_batch_plots(result: dict, settings: GuiSettings) -> list[Path]:
+    """Save absmax/max/min plan plots for every load of ``result`` (pure-ish,
+    no COM — calls ``plots.plot_base_reactions``; safe on a background thread).
+
+    Target directory: the sidebar's **Batch plot dir**; when blank it falls
+    back to the Output dir for an extraction result, or the Plot output dir
+    (else the CSV's parent) for a CSV-loaded result.  Returns the non-empty
+    written paths.
+    """
+    from etabs_extractor.plots import STEP_VARIANTS, plot_base_reactions
+
+    df = result.get("df")
+    if df is None or len(df) == 0:
+        raise ValueError("No extraction/CSV result loaded to plot.")
+
+    target = (settings.batch_plot_dir or "").strip()
+    if not target:
+        if result.get("output_dir"):
+            # Extraction result: fall back to the extraction's output dir.
+            target = (settings.output_dir or str(result["output_dir"])).strip()
+        else:
+            # CSV-loaded result: Plot output dir, else the CSV's parent.
+            target = (settings.plot_output_dir or "").strip()
+            if not target and (settings.csv_path or "").strip():
+                target = str(Path(settings.csv_path.strip()).parent)
+    if not target:
+        raise ValueError(
+            "No batch plot directory: set Batch plot dir (or Output / Plot "
+            "output dir)."
+        )
+
+    paths = plot_base_reactions(
+        df, target, steps=STEP_VARIANTS, **build_plot_kwargs(settings)
+    )
+    return [p for p in paths if str(p)]
 
 
 def check_active_model(attach: bool = True, session=None) -> str:
@@ -288,7 +327,7 @@ def inspect_active_model(attach: bool = True, session=None) -> dict:
             logging.getLogger(__name__).debug("Could not list elevations: %s", exc)
             info["elevations"] = []
         return info
-    except Exception as exc:  # noqa: BLE001 - root-cause tooltip
+    except Exception as exc:
         raise RuntimeError(f"Could not inspect active model: {exc}") from exc
     finally:
         if own:

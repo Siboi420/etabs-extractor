@@ -16,9 +16,10 @@ filter.
 
 from __future__ import annotations
 
-import customtkinter as ctk
-import tkinter as tk
 import logging
+import tkinter as tk
+
+import customtkinter as ctk
 
 from etabs_extractor.gui.state import LoadSelectionModel
 

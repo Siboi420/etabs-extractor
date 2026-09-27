@@ -14,17 +14,10 @@ importable and testable on any platform (e.g. WSL/Linux for the dry run).
 from .config import (
     DEFAULT_COM_PROGID,
     DEFAULT_MODEL_VARIABLE,
-    DEFAULT_OUTPUT_VARIABLE,
     DEFAULT_OUTPUT_DIR,
+    DEFAULT_OUTPUT_VARIABLE,
     resolve_model_path,
     resolve_output_dir,
-)
-from .models import (
-    FrameForceRecord,
-    JointReactionRecord,
-    summarize_base_envelope_minmax,
-    to_base_dataframe,
-    to_dataframe,
 )
 from .io import (
     write_all_base_csv,
@@ -37,11 +30,19 @@ from .io import (
     write_csv,
     write_frame_step_csv,
 )
+from .models import (
+    FrameForceRecord,
+    JointReactionRecord,
+    summarize_base_envelope_minmax,
+    to_base_dataframe,
+    to_dataframe,
+)
 from .plots import (
     COMPONENT_COLUMNS,
     COMPONENT_UNITS,
     DEFAULT_COMPONENTS,
     DEFAULT_UNITS,
+    STEP_VARIANTS,
     UNITS,
     build_base_reactions_figure,
     plot_base_reactions,
@@ -75,6 +76,7 @@ __all__ = [
     "COMPONENT_UNITS",
     "DEFAULT_UNITS",
     "UNITS",
+    "STEP_VARIANTS",
     "plot_base_reactions",
     "plot_base_reactions_from_csv",
     "build_base_reactions_figure",

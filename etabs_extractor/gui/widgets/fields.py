@@ -8,9 +8,9 @@ time).
 from __future__ import annotations
 
 from pathlib import Path
+from tkinter import filedialog
 
 import customtkinter as ctk
-from tkinter import filedialog
 
 _LABEL_WIDTH = 96
 

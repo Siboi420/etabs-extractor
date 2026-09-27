@@ -8,7 +8,7 @@ is usable from the stub-based dry run and tests on any platform.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Iterable, cast
 
 if TYPE_CHECKING:

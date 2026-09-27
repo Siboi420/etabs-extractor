@@ -151,6 +151,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Image format for --plot / --plot-csv (default: png; e.g. png, pdf, svg).",
     )
     parser.add_argument(
+        "--plot-steps",
+        default="absmax",
+        metavar="STEPS",
+        help="Comma-separated plot variants for --plot / --plot-csv: any of "
+        "absmax,max,min (default: absmax — today's behavior). 'absmax' plots "
+        "the max-|value| per point across all rows; 'max'/'min' plot only the "
+        "envelope's Max/Min rows (stepless loads skip them, filenames get "
+        "_max/_min).",
+    )
+    parser.add_argument(
         "--units",
         default="model",
         metavar="UNIT",
@@ -194,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
                 fmt=args.plot_format,
                 units=args.units,
                 tag=args.tag,
+                steps=[s.strip() for s in args.plot_steps.split(",") if s.strip()],
             )
         except Exception as exc:  # noqa: BLE001
             print(f"[etabs_extractor] could not plot CSV: {exc}", file=sys.stderr)
@@ -273,6 +284,7 @@ def main(argv: list[str] | None = None) -> int:
                     plot_paths = plot_base_reactions(
                         df, plot_dir, fmt=args.plot_format, units=args.units,
                         tag=args.tag,
+                        steps=[s.strip() for s in args.plot_steps.split(",") if s.strip()],
                     )
                 except Exception as exc:  # noqa: BLE001
                     print(

@@ -19,11 +19,12 @@ import os
 import tempfile
 from pathlib import Path
 
-import matplotlib  # noqa: E402
+import matplotlib
+
 matplotlib.use("Agg")
 
 # Make the package importable when run directly as a script.
-import sys  # noqa: E402
+import sys
 
 if __package__ in (None, ""):
     # Test lives at <root>/etabs_extractor/tests/, so go up 3 levels to root.
@@ -31,16 +32,16 @@ if __package__ in (None, ""):
     if sys_path not in sys.path:
         sys.path.insert(0, sys_path)
 
-import pandas as pd  # noqa: E402
+import pandas as pd
 
-from etabs_extractor.gui.state import (  # noqa: E402
+from etabs_extractor.gui import service
+from etabs_extractor.gui.state import (
     GuiSettings,
     LoadSelectionModel,
     parse_combos,
     parse_elevation,
 )
-from etabs_extractor.gui import service  # noqa: E402
-from etabs_extractor.plots import (  # noqa: E402
+from etabs_extractor.plots import (
     build_base_reactions_figure,
     plot_base_reactions,
 )
@@ -58,6 +59,30 @@ def _sample_df():
              "F1": -8.0, "F2": -1.0, "F3": 110.0, "M1": 0.0, "M2": 0.0, "M3": 0.0},
         ]
     )
+
+
+def _envelope_df():
+    """Synthetic two-load frame: one envelope load with Max/Min rows whose
+    governing values differ per point, plus one stepless (plain case) load."""
+    rows = []
+    for step, f3_p1, f3_p2 in (("Max", 100.0, -30.0), ("Min", -60.0, -80.0)):
+        rows.append(
+            {"point": "1", "x": 0.0, "y": 0.0, "z": 0.0,
+             "load_name": "ENV", "load_kind": "COMBO", "step_type": step,
+             "F1": 10.0, "F2": 2.0, "F3": f3_p1, "M1": 1.0, "M2": 3.0, "M3": 0.5},
+        )
+        rows.append(
+            {"point": "2", "x": 6000.0, "y": 0.0, "z": 0.0,
+             "load_name": "ENV", "load_kind": "COMBO", "step_type": step,
+             "F1": -8.0, "F2": -1.0, "F3": f3_p2, "M1": 0.0, "M2": 0.0, "M3": 0.0},
+        )
+    # Stepless load (plain case / legacy CSV: no step_type column rows).
+    rows.append(
+        {"point": "1", "x": 0.0, "y": 0.0, "z": 0.0,
+         "load_name": "DL", "load_kind": "CASE",
+         "F1": 1.0, "F2": 0.0, "F3": 50.0, "M1": 0.0, "M2": 0.0, "M3": 0.0},
+    )
+    return pd.DataFrame(rows)
 
 
 def _no_point_df():
@@ -94,10 +119,10 @@ def _corner_df():
 
 def test_gui_imports_without_display():
     """Importing the GUI package/state/service must succeed with no display."""
-    import etabs_extractor.gui.app  # noqa: F401
-    import etabs_extractor.gui.runner  # noqa: F401
+    import etabs_extractor.gui.app
+    import etabs_extractor.gui.runner
+    import etabs_extractor.gui.widgets.plot_settings
     import etabs_extractor.gui.widgets.preview  # noqa: F401
-    import etabs_extractor.gui.widgets.plot_settings  # noqa: F401
     print("GUI import OK (no display, no comtypes)")
 
 
@@ -296,8 +321,8 @@ def test_load_selection_model_kind_groups():
     assert model.all_combos == ["COL1", "B1"]
     assert model.all_cases == ["C1", "B2"]
     items = model.items()
-    model.toggle(items.index([i for i in items if i.name == "COL1"][0]), True)
-    model.toggle(items.index([i for i in items if i.name == "B2"][0]), True)
+    model.toggle(items.index(next(i for i in items if i.name == "COL1")), True)
+    model.toggle(items.index(next(i for i in items if i.name == "B2")), True)
     a, b = model.get_selected()
     assert a == ["COL1"], a
     assert b == ["B2"], b
@@ -388,8 +413,8 @@ def test_load_selection_model():
     assert len(model.matches("")) == 4
     # Toggle selection and retrieve as split (combos, cases).
     items = model.items()
-    model.toggle(items.index([i for i in items if i.name == "ASD 1"][0]), True)
-    model.toggle(items.index([i for i in items if i.name == "Dead"][0]), True)
+    model.toggle(items.index(next(i for i in items if i.name == "ASD 1")), True)
+    model.toggle(items.index(next(i for i in items if i.name == "Dead")), True)
     combos, cases = model.get_selected()
     assert combos == ["ASD 1"], combos
     assert cases == ["Dead"], cases
@@ -561,6 +586,140 @@ def test_write_base_step_csv():
     print("write_base_step_csv OK")
 
 
+def test_plot_base_reactions_steps():
+    """steps=(absmax, max, min): one envelope load yields exactly 3 files
+    (base_<load>_plan, _max, _min); a stepless load yields only the abs-max
+    file.  Default steps=None keeps today's single-file behavior."""
+    from etabs_extractor.plots import STEP_VARIANTS
+
+    assert STEP_VARIANTS == ("absmax", "max", "min")
+    df = _envelope_df()
+    with tempfile.TemporaryDirectory() as td:
+        paths = plot_base_reactions(
+            df, td, steps=("absmax", "max", "min"),
+            dpi=100, dynamic_size=False, figsize=(6, 5),
+        )
+        names = sorted(p.name for p in paths)
+        assert names == [
+            "base_DL_plan.png",
+            "base_ENV_plan.png",
+            "base_ENV_plan_max.png",
+            "base_ENV_plan_min.png",
+        ], names
+        for p in paths:
+            assert p.exists() and p.stat().st_size > 0, p
+
+        # Default (steps=None) -> absmax only: today's behavior unchanged.
+        with tempfile.TemporaryDirectory() as td2:
+            paths2 = plot_base_reactions(
+                df, td2, dpi=100, dynamic_size=False, figsize=(6, 5),
+            )
+            assert sorted(p.name for p in paths2) == [
+                "base_DL_plan.png", "base_ENV_plan.png",
+            ]
+    print("plot_base_reactions steps variants OK")
+
+
+def test_plot_steps_invalid_variant_raises():
+    """An unknown step variant raises ValueError with the known list."""
+    df = _envelope_df()
+    try:
+        build_base_reactions_figure(df, "ENV", step="bogus")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "absmax" in str(exc), str(exc)
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            plot_base_reactions(df, td, steps=["absmax", "nope"])
+            assert False, "expected ValueError"
+        except ValueError as exc:
+            assert "nope" in str(exc), str(exc)
+    print("invalid step variant -> ValueError OK")
+
+
+def test_build_figure_step_filter():
+    """step='max'/'min' render only that envelope step's values (label-text
+    assert); stepless data with step='max' yields None (no such rows)."""
+    import matplotlib.pyplot as plt
+
+    df = _envelope_df()
+    df_env = df[df["load_name"] == "ENV"]
+
+    fig_max = build_base_reactions_figure(df_env, "ENV", step="max")
+    assert fig_max is not None
+    texts = "\n".join(t.get_text() for t in fig_max.axes[0].texts)
+    assert "Fz=100" in texts and "Fz=-30" in texts, texts
+    assert "Fz=-60" not in texts and "Fz=-80" not in texts, texts
+    assert "(Max)" in fig_max.axes[0].get_title(), fig_max.axes[0].get_title()
+    plt.close(fig_max)
+
+    fig_min = build_base_reactions_figure(df_env, "ENV", step="min")
+    assert fig_min is not None
+    texts_min = "\n".join(t.get_text() for t in fig_min.axes[0].texts)
+    assert "Fz=-60" in texts_min and "Fz=-80" in texts_min, texts_min
+    assert "(Min)" in fig_min.axes[0].get_title()
+    plt.close(fig_min)
+
+    # Abs max (default): per point, max-|value| across Max/Min rows.
+    fig_abs = build_base_reactions_figure(df_env, "ENV")
+    assert fig_abs is not None
+    texts_abs = "\n".join(t.get_text() for t in fig_abs.axes[0].texts)
+    assert "Fz=100" in texts_abs and "Fz=-80" in texts_abs, texts_abs
+    assert "(Max)" not in fig_abs.axes[0].get_title()
+    plt.close(fig_abs)
+
+    # Stepless load: Max/Min variants have no rows -> no figure.
+    df_dl = df[df["load_name"] == "DL"]
+    assert build_base_reactions_figure(df_dl, "DL", step="max") is None
+    print("build_base_reactions_figure step filter OK")
+
+
+def test_save_batch_plots():
+    """service.save_batch_plots: Batch plot dir wins; blank falls back to
+    Output dir (extraction result) / Plot output or CSV parent (CSV result);
+    no directory at all raises a clear error."""
+    df = _envelope_df()
+    result = {"df": df, "output_dir": None, "load_names": ["ENV", "DL"]}
+
+    # 1. Explicit Batch plot dir.
+    with tempfile.TemporaryDirectory() as td_batch:
+        s = GuiSettings(batch_plot_dir=td_batch, dpi=100)
+        paths = service.save_batch_plots(result, s)
+        assert len(paths) == 4, [p.name for p in paths]
+        assert all(p.parent == Path(td_batch) for p in paths), paths
+
+    # 2. Blank Batch plot dir + extraction result -> Output dir.
+    with tempfile.TemporaryDirectory() as td_out:
+        s = GuiSettings(output_dir=td_out, dpi=100)
+        extraction = {"df": df, "output_dir": td_out}
+        paths = service.save_batch_plots(extraction, s)
+        assert len(paths) == 4
+        assert all(p.parent == Path(td_out) for p in paths)
+
+    # 3. Blank Batch plot dir + CSV result -> Plot output dir, else CSV parent.
+    with tempfile.TemporaryDirectory() as td_csv:
+        csv_path = Path(td_csv) / "all_base_reactions.csv"
+        csv_path.write_text("x,y,load_name\n", encoding="utf-8")
+        s = GuiSettings(csv_path=str(csv_path), dpi=100)
+        paths = service.save_batch_plots(result, s)
+        assert all(p.parent == Path(td_csv) for p in paths)
+
+        # Explicit Plot output dir wins over the CSV parent.
+        with tempfile.TemporaryDirectory() as td_plot:
+            s2 = GuiSettings(csv_path=str(csv_path),
+                             plot_output_dir=td_plot, dpi=100)
+            paths2 = service.save_batch_plots(result, s2)
+            assert all(p.parent == Path(td_plot) for p in paths2)
+
+    # 4. Nothing configured -> clear ValueError.
+    try:
+        service.save_batch_plots({"df": df, "output_dir": None}, GuiSettings(dpi=100))
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "Batch plot" in str(exc) or "batch plot" in str(exc), str(exc)
+    print("service.save_batch_plots fallback chain OK")
+
+
 def run():
     test_gui_imports_without_display()
     test_build_figure_fixed_size()
@@ -572,6 +731,10 @@ def run():
     test_build_figure_none_for_no_points()
     test_plot_base_reactions_dpi_figsize()
     test_plot_single_step_stem_and_title()
+    test_plot_base_reactions_steps()
+    test_plot_steps_invalid_variant_raises()
+    test_build_figure_step_filter()
+    test_save_batch_plots()
     test_write_base_step_csv()
     test_service_frame_mode_kwargs()
     test_service_extract_kwargs_mapping()

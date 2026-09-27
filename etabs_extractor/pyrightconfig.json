@@ -1,0 +1,8 @@
+{
+  "comment": "Shim for tooling that runs pyright with cwd inside the package dir (pyright only looks for pyrightconfig.json in cwd, never upward): point it at the repo-root .venv and put the repo root on extraPaths so 'import etabs_extractor' resolves. The repo-root config remains authoritative for the documented gate (pyright etabs_extractor/ from the repo root).",
+  "venvPath": "..",
+  "venv": ".venv",
+  "extraPaths": [".."],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "basic"
+}

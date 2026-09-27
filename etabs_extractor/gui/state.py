@@ -49,6 +49,10 @@ class GuiSettings:
     # CSV plotting (no ETABS)
     csv_path: str = ""
 
+    # Batch plot save target (sidebar, both modes); blank = mode fallback
+    # (extraction: Output dir; CSV mode: Plot output dir, else the CSV's parent).
+    batch_plot_dir: str = ""
+
     # Plot appearance
     plot_after_extract: bool = False
     dynamic_size: bool = True
@@ -76,6 +80,10 @@ FORMATS: tuple[str, ...] = ("png", "pdf", "svg")
 
 # Accepted extraction modes for the GUI mode switch.
 MODE_CHOICES: tuple[str, ...] = ("base", "frame")
+
+# Base-preview step variants (label shown in the dropdown -> plots.STEP_VARIANTS
+# entry via preview._STEP_VARIANT).  "Abs max" is today's max-|value| default.
+STEP_CHOICES: tuple[str, ...] = ("Abs max", "Max", "Min")
 
 # Accepted plot display-unit choices for the GUI dropdown ("data" displays
 # the extraction's own units unconverted; the rest are named presets from
@@ -151,7 +159,7 @@ class _LoadItem:
     """A single load item in the checklist: its name, kind (``combos`` or
     ``cases``) and selected flag."""
 
-    __slots__ = ("name", "kind", "selected")
+    __slots__ = ("kind", "name", "selected")
 
     def __init__(self, name: str, kind: str, selected: bool = False) -> None:
         self.name = name
@@ -234,7 +242,7 @@ class LoadSelectionModel:
         items."""
         q = (query or "").strip().lower()
         if not q:
-            return [it for it in self._items]
+            return list(self._items)
         return [it for it in self._items if q in it.display.lower()]
 
     # ------------------------------------------------------------ selection

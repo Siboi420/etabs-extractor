@@ -23,9 +23,10 @@ import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-from matplotlib.figure import Figure
 import numpy as np
 import pandas as pd
+from matplotlib.figure import Figure
+from matplotlib.ticker import FuncFormatter
 
 from etabs_extractor.units import LEGACY_FRAME, LENGTH_TO_M, UnitSystem
 from etabs_extractor.units import factors as _unit_factors
@@ -46,8 +47,10 @@ FORCE_DIAGRAMS = [
 def load_data(csv_path: str) -> pd.DataFrame:
     """Load the all_forces CSV and return a filtered, sorted DataFrame."""
     df = pd.read_csv(csv_path)
-    # Remove Modal results (they are not meaningful for force diagrams)
-    df = df[df["load_name"] != "Modal"].copy()
+    # Remove Modal results (they are not meaningful for force diagrams).
+    # .loc[mask] (not df[mask]): pandas-stubs types boolean-mask __getitem__
+    # as a DataFrame|Series union, which poisons every downstream call.
+    df = df.loc[df["load_name"] != "Modal"].copy()
     # Sort for consistent ordering
     df.sort_values(["load_name", "section", "frame", "station"], inplace=True)
     return df
@@ -65,7 +68,7 @@ def get_load_cases(df: pd.DataFrame) -> list[str]:
 
 def get_frames_for_section(df: pd.DataFrame, section: str) -> list[int]:
     """Return sorted unique frame numbers for a given section."""
-    frames = df[df["section"] == section]["frame"].unique()
+    frames = df.loc[df["section"] == section, "frame"].unique()
     return sorted(frames)
 
 
@@ -73,7 +76,7 @@ def get_beam_max_force(
     df: pd.DataFrame, section: str, load_name: str, force_col: str = "M3"
 ) -> tuple[int, float]:
     """Return (frame, max_abs_force) for the beam with highest |force|."""
-    sub = df[(df["section"] == section) & (df["load_name"] == load_name)]
+    sub = df.loc[(df["section"] == section) & (df["load_name"] == load_name)]
     if sub.empty:
         return (0, 0.0)
     idx = sub[force_col].abs().idxmax()
@@ -89,12 +92,12 @@ def get_lengths_for_section(df: pd.DataFrame, section: str) -> list[float]:
     :func:`_length_tol`) to group floating-point noise from the COM
     extraction (e.g. 4099.999999998 → 4100.0).
     """
-    sub = df[df["section"] == section]
+    sub = df.loc[df["section"] == section]
     if "length_mm" not in sub.columns:
         return []
     tol = _length_tol(sub)
     lengths = sub["length_mm"].dropna().unique()
-    rounded = sorted({_round_to_tol(l, tol) for l in lengths})
+    rounded = sorted({_round_to_tol(length, tol) for length in lengths})
     return rounded
 
 
@@ -108,7 +111,7 @@ def get_frames_for_length(
     :func:`_length_tol`) to handle floating-point noise from the COM
     extraction.
     """
-    sub = df[df["section"] == section]
+    sub = df.loc[df["section"] == section]
     if "length_mm" not in sub.columns:
         return []
     tol = _length_tol(sub)
@@ -130,7 +133,7 @@ def get_beam_data(
         frame_val = int(frame)
     else:
         frame_val = str(frame)
-    sub = df[(frame_col == frame_val) & (df["load_name"] == load_name)].copy()
+    sub = df.loc[(frame_col == frame_val) & (df["load_name"] == load_name)].copy()
     if sub.empty:
         return None
     # Sort by step_type then station — groups envelope steps (Max, Min)
@@ -184,8 +187,12 @@ def _data_units(df: pd.DataFrame) -> UnitSystem:
             length = str(df["length_unit"].dropna().iloc[0])
             if force and length:
                 return UnitSystem(force, length)
-    except (IndexError, KeyError):
-        pass
+    except (IndexError, KeyError) as exc:
+        import logging
+
+        logging.getLogger(__name__).debug(
+            "Could not read data units from CSV columns: %s", exc
+        )
     return LEGACY_FRAME
 
 
@@ -271,15 +278,15 @@ def plot_beam_diagrams(
     lf = _length_scale(src)
 
     length_native = (
-        beam_data["length_mm"].iloc[0]
+        float(beam_data["length_mm"].to_numpy()[0])
         if "length_mm" in beam_data.columns
-        else beam_data["station"].max()
+        else float(beam_data["station"].to_numpy().max())
     )
     length_m = length_native * lf if length_native else 0.0
 
     is_envelope = len(groups) > 1
 
-    for ax, col in zip(axs, force_cols):
+    for ax, col in zip(axs, force_cols, strict=True):
         ax.clear()
         label = _unit_label(col)
         col_name = {"P": "Axial (P)", "V2": "Shear (V2)", "M3": "Moment (M3)"}.get(col, col)
@@ -290,15 +297,15 @@ def plot_beam_diagrams(
         all_v = np.array([])
         all_s = np.array([])
 
-        def _make_vals(grp):
-            raw = np.array([_scale_force(v, col, src) for v in grp[col].values])
-            return _diagram_vals(raw, col)
+        def _make_vals(grp, _col=col):
+            raw = np.array([_scale_force(v, _col, src) for v in grp[_col].to_numpy()])
+            return _diagram_vals(raw, _col)
 
         if is_envelope and step_type:
             # Single step: plot only the requested step
             if step_type in groups:
                 grp = groups[step_type]
-                stations_m = grp["station"].values * lf
+                stations_m = grp["station"].to_numpy() * lf
                 vals = _make_vals(grp)
                 all_s, all_v = stations_m, vals
                 ax.plot(stations_m, vals, color="blue", linewidth=2.0,
@@ -320,7 +327,7 @@ def plot_beam_diagrams(
                 if step_key not in groups:
                     continue
                 grp = groups[step_key]
-                stations_m = grp["station"].values * lf
+                stations_m = grp["station"].to_numpy() * lf
                 vals = _make_vals(grp)
                 if len(vals) == 0:
                     continue
@@ -339,7 +346,7 @@ def plot_beam_diagrams(
         else:
             # Single step: one clean blue line
             grp = next(iter(groups.values()))
-            stations_m = grp["station"].values * lf
+            stations_m = grp["station"].to_numpy() * lf
             vals = _make_vals(grp)
             all_s, all_v = stations_m, vals
             ax.plot(stations_m, vals, color="blue", linewidth=2.0,
@@ -363,7 +370,7 @@ def plot_beam_diagrams(
         if col in ("M2", "M3"):
             def _moment_fmt(x, _pos, _col=col):
                 return f"{_diagram_vals(np.array([x]), _col)[0]:.0f}"
-            ax.yaxis.set_major_formatter(plt.FuncFormatter(_moment_fmt))
+            ax.yaxis.set_major_formatter(FuncFormatter(_moment_fmt))
 
         # Annotate global max/min (undo diagram inversion so values show
         # the original signed moment, not the negated plot coordinate)
@@ -408,7 +415,7 @@ def build_frame_figure(
     *,
     figsize: tuple[float, float] = (12, 10),
     step_type: str | None = None,
-) -> plt.Figure | None:
+) -> Figure | None:
     """Build a 3-panel beam force diagram figure (P, V2, M3).
 
     Filters ``df`` by ``frame`` and ``load_name``, optionally overrides
@@ -445,11 +452,11 @@ def find_highest_force_frame(
     Optionally filters by ``length_mm`` (within 1mm tolerance).
     Returns ``None`` if no matching data.
     """
-    sub = df[df["section"] == section]
+    sub = df.loc[df["section"] == section]
     if length_mm is not None and "length_mm" in sub.columns:
         tol = _length_tol(sub)
-        sub = sub[sub["length_mm"].notna() & (sub["length_mm"].sub(length_mm).abs() <= tol)]
-    sub = sub[sub["load_name"] == load_name]
+        sub = sub.loc[sub["length_mm"].notna() & (sub["length_mm"].sub(length_mm).abs() <= tol)]
+    sub = sub.loc[sub["load_name"] == load_name]
     if sub.empty:
         return None
     idx = sub[force_col].abs().idxmax()
@@ -466,7 +473,7 @@ def build_batch_frame_figure(
     step_type: str | None = None,
     highlight_best: bool = True,
     figsize: tuple[float, float] = (14, 10),
-) -> plt.Figure | None:
+) -> Figure | None:
     """Build a **single 3-panel figure** with all beams at the given
     section + length overlaid on the same axes.
 
@@ -490,7 +497,7 @@ def build_batch_frame_figure(
         bd = get_beam_data(df, f, load_name)
         if bd is None or bd.empty:
             continue
-        peak = float(bd[force_col].abs().max())
+        peak = float(bd[force_col].abs().to_numpy().max())
         scored.append((f, peak))
     if not scored:
         return None
@@ -523,7 +530,7 @@ def build_batch_frame_figure(
     force_cols = ("P", "V2", "M3")
     _col_labels = {"P": "Axial (P)", "V2": "Shear (V2)", "M3": "Moment (M3)"}
 
-    for ax_idx, (ax, col) in enumerate(zip(axs, force_cols)):
+    for ax_idx, (ax, col) in enumerate(zip(axs, force_cols, strict=True)):
         ax.set_title(_col_labels[col], fontsize=10, fontweight="bold")
         ax.set_ylabel(_unit_label(col), fontsize=9)
         if ax_idx == 2:
@@ -531,7 +538,7 @@ def build_batch_frame_figure(
         ax.grid(True, alpha=0.2)
         ax.axhline(0, color="gray", linewidth=0.5, linestyle="--")
 
-    for idx, (frame, peak) in enumerate(scored):
+    for idx, (frame, _peak) in enumerate(scored):
         bd = get_beam_data(df, frame, load_name)
         if bd is None or bd.empty:
             continue
@@ -550,10 +557,10 @@ def build_batch_frame_figure(
         else:
             grp = next(iter(groups.values()))
 
-        stations_m = grp["station"].values * lf
+        stations_m = grp["station"].to_numpy() * lf
 
-        for ax, fcol in zip(axs, force_cols):
-            raw = np.array([_scale_force(v, fcol, src) for v in grp[fcol].values])
+        for ax, fcol in zip(axs, force_cols, strict=True):
+            raw = np.array([_scale_force(v, fcol, src) for v in grp[fcol].to_numpy()])
             vals = _diagram_vals(raw, fcol)
             ax.plot(stations_m, vals, color=color, linewidth=lw,
                     alpha=alpha, zorder=zorder, label=label)
@@ -565,13 +572,13 @@ def build_batch_frame_figure(
         # Deduplicate keeping first occurrence (best beam first)
         seen: set[str] = set()
         uniq: list = []
-        for h, l in zip(handles, labels):
-            if l not in seen:
-                seen.add(l)
-                uniq.append((h, l))
+        for h, lab in zip(handles, labels, strict=True):
+            if lab not in seen:
+                seen.add(lab)
+                uniq.append((h, lab))
         if uniq:
-            leg = ax.legend(
-                [h for h, _ in uniq], [l for _, l in uniq],
+            ax.legend(
+                [h for h, _ in uniq], [lab for _, lab in uniq],
                 loc="upper left", fontsize=6,
                 ncol=1 if len(uniq) > 12 else 2,
                 framealpha=0.8,
@@ -579,7 +586,7 @@ def build_batch_frame_figure(
             # Adjust legend position for the middle panel
             if ax_idx == 1:
                 ax.legend(
-                    [h for h, _ in uniq], [l for _, l in uniq],
+                    [h for h, _ in uniq], [lab for _, lab in uniq],
                     loc="upper left", fontsize=6,
                     ncol=1 if len(uniq) > 12 else 2,
                     framealpha=0.8,
@@ -609,7 +616,7 @@ class BeamViewer:
 
         # Build figure
         self.fig, self.axs = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
-        self.fig.canvas.manager.set_window_title("Beam Force Diagram Viewer")
+        self.fig.canvas.manager.set_window_title("Beam Force Diagram Viewer")  # type: ignore[union-attr]  # pyright: ignore[reportOptionalMemberAccess]
         self.fig.subplots_adjust(hspace=0.35, left=0.08, right=0.95, top=0.94, bottom=0.06)
 
         # Connect keyboard events
@@ -646,13 +653,12 @@ class BeamViewer:
 
     def _get_beam_section_info(self, frame: int) -> str:
         """Get section info for a frame."""
-        sub = self.df[self.df["frame"] == frame]
+        sub = self.df.loc[self.df["frame"] == frame]
         if not sub.empty:
-            return sub["section"].iloc[0]
+            return str(sub["section"].iloc[0])
         return ""
 
     def _render(self) -> None:
-        section = self.sections[self.section_idx]
         load = self.load_cases[self.load_idx]
 
         if not self.frames:

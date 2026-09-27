@@ -97,8 +97,11 @@ In the window:
   `ETABS_OUTPUT`, with a **Browse** button — like the Model field's, always
   visible/clickable regardless of window width; both fields stack their label
   above the entry+Browse row rather than packing all three side by side), a
-  **Tag** field (filename suffix, sanitized, with a live "Suffix: _xxx" hint),
-  and **Attach (not launch)** / **Run analysis** switches.
+  **Batch plot dir** (target for the preview's **Batch save plots** button;
+  blank falls back to the Output dir for an extraction result, or the Plot
+  output / CSV folder for a CSV-loaded result), a **Tag** field (filename
+  suffix, sanitized, with a live "Suffix: _xxx" hint), and **Attach (not
+  launch)** / **Run analysis** switches.
 - **Units card** — **Force** and **Length** dropdowns selecting the output
   unit system (default **`model`** on both — the active model's own present
   units, read live via `EtabsSession.get_present_units()`; no conversion), plus
@@ -140,9 +143,16 @@ In the window:
   sidebar's action buttons disable. On completion the workspace switches to
   the **Preview** tab and renders the first load automatically.
 - **Preview tab** — embedded, not a pop-up:
-  - *Base mode* (`BasePreviewPanel`): a Load dropdown, **Refresh** (re-reads
-    the Plot settings tab and re-renders) and **Save image...** buttons over
-    an embedded matplotlib canvas.
+  - *Base mode* (`BasePreviewPanel`): a Load dropdown, a **Step** dropdown
+    (**Abs max** default — the max-|value| per point across all rows;
+    **Max** / **Min** show only that envelope step, with the existing
+    `(Max)`/`(Min)` title suffix), **Refresh** (re-reads the Plot settings
+    tab and re-renders), **Save image...**, and **Batch save plots...**
+    (writes, for **every load of the current result**, all three step
+    variants into the **Batch plot dir** — no dialog; see the sidebar's
+    Model & output card). Stepless loads (plain cases / legacy CSVs without
+    `step_type`) have no Max/Min rows: selecting Max/Min for one falls back
+    to the abs-max view with a log note.
   - *Frame mode* (`FramePreviewPanel`): Load / Section / Step
     (Both/Max/Min) / Force (Moment M3, Shear V2, Axial P) / Length
     dropdowns, **Refresh**, **Save image...**, and **Batch plot all
@@ -210,6 +220,9 @@ python -m etabs_extractor --plot-csv out/all_base_reactions.csv --units tonf-mm
 
 # Append a filename suffix to every CSV / plot (e.g. `_KM13`):
 python -m etabs_extractor --plot-csv out/all_base_reactions.csv --tag KM13
+
+# Plot per envelope step: absmax (default) plus the Max/Min rows only:
+python -m etabs_extractor --plot-csv out/all_base_reactions.csv --plot-steps absmax,max,min
 ```
 
 Each produces one `base_<load>_plan.<fmt>` (or `base_<load>_plan_<tag>.<fmt>`
@@ -218,6 +231,21 @@ output directory (or, for `--plot-csv`, next to the CSV). Every point is
 labelled with its **point/joint number as the first line** (bare number, e.g.
 `1`), followed by its `Fz`, `M2`, `M3` values. See "Library API"
 for the components map and how to change/annotate a different set.
+
+### Step variants (`--plot-steps`, default `absmax`)
+
+`--plot` and `--plot-csv` accept a comma-separated list of plot variants
+(`absmax`, `max`, `min`):
+
+- **`absmax`** (default, today's behavior) — per point, the value with the
+  largest absolute magnitude across all rows (sign preserved).
+- **`max`** / **`min`** — only the envelope's `Max` / `Min` rows
+  (case-insensitive `step_type`), one figure per load per variant. Filenames
+  reuse the step-aware stem logic: `base_<load>_plan_max.<fmt>` /
+  `base_<load>_plan_min.<fmt>` (plus any `--tag`), and the title gets the
+  existing `(Max)` / `(Min)` suffix. Loads without envelope steps (plain
+  cases, legacy CSVs without a `step_type` column) **skip** the Max/Min
+  variants — only the abs-max figure is written.
 
 `--units` selects the plot's display units: `model`/`data` (default —
 display the CSV/DataFrame's own units unconverted, i.e. whatever the
@@ -402,7 +430,11 @@ level: `z`, story label, point count).
 `--plot` (after `--extract base`) renders one plan-view figure per load into
 the output dir; `--plot-csv PATH` is a standalone mode that reads a base CSV
 and plots it with no model/COM (wins over any model args and exits first).
-`--plot-format` sets the image format (default `png`). `--units` selects the
+`--plot-format` sets the image format (default `png`). `--plot-steps` takes a
+comma-separated list of plot variants (`absmax,max,min`; default `absmax` —
+today's behavior; see "Step variants" above: `max`/`min` plot only that
+envelope step, stepless loads skip them, filenames get `_max`/`_min`).
+`--units` selects the
 plot's display units: `model`/`data` (default — the CSV/DataFrame's own
 units, unconverted), a named preset (`kN-m`, `kN-mm`, `N-mm`, `tonf-m`,
 `kgf-m`), or any `"<force>-<length>"` pair. `--tag NAME` appends `_NAME` to
@@ -578,6 +610,10 @@ filtering for dot-plotting is done downstream.
   `base_<load>_plan_max.<fmt>`. The two files of one load never overwrite each
   other. Mixed / multi-step inputs (`all_base_reactions.csv`, the mixed
   per-load CSV) keep the legacy `base_<load>_plan.<fmt>` names.
+- **Step variants (`--plot-steps absmax,max,min`):** `max`/`min` write
+  `base_<load>_plan_max.<fmt>` / `base_<load>_plan_min.<fmt>` per load (that
+  envelope step's rows only; stepless loads skip them), alongside the
+  unchanged abs-max `base_<load>_plan.<fmt>`.
 
 ## Testing / verification
 

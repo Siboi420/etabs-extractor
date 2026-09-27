@@ -10,14 +10,15 @@ touches comtypes.
 
 from __future__ import annotations
 
-import tempfile
 import os
+import tempfile
 from pathlib import Path
 
 # Use the non-interactive Agg backend for headless plotting in tests, and
 # set it before importing anything that might touch pyplot.  This keeps the
 # dry-run fully offline (no display, no COM).
 import matplotlib  # noqa: E402
+
 matplotlib.use("Agg")
 
 # Make the package importable when run directly as a script.
@@ -919,7 +920,7 @@ def run():
         # "mm" — the fake model's native units).  "model"/"data" resolves to
         # those source units unconverted (scale 1.0); "kN-m" resolves the
         # actual N/mm -> kN/m conversion factors.
-        from etabs_extractor.plots import _resolve_units, UNITS
+        from etabs_extractor.plots import UNITS, _resolve_units
 
         data_def = _resolve_units("model", bdf)
         assert data_def["force"] == "N" and data_def["length"] == "mm", data_def

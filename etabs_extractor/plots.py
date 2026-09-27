@@ -18,8 +18,9 @@ Two entry points mirror the two run modes:
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -79,6 +80,13 @@ UNITS: dict[str, dict[str, str]] = {
 # ``"model"`` is accepted as a synonym (kept for CLI/back-compat).
 DEFAULT_UNITS = "data"
 
+# Plot step variants for envelope loads.  ``"absmax"`` is today's behavior
+# (max-|value| aggregation over all rows, sign preserved); ``"max"`` /
+# ``"min"`` plot only the rows whose ``step_type`` equals Max / Min
+# (case-insensitive).  Stepless loads (plain cases / legacy CSVs) skip the
+# Max/Min variants.
+STEP_VARIANTS: tuple[str, ...] = ("absmax", "max", "min")
+
 _REQUIRED_DATAFRAME_COLUMNS = ("x", "y", "load_name")
 
 # Friendly component name -> dimension ("force" or "moment") for unit scaling.
@@ -108,6 +116,7 @@ def plot_base_reactions(
     x_offset: float = 1.0,
     y_offset: float = 1.0,
     tag: str | None = None,
+    steps: Sequence[str] | None = None,
 ) -> list[Path]:
     """Render plan-view (x-y) figures of base reactions and save them.
 
@@ -146,14 +155,19 @@ def plot_base_reactions(
         axis limits on each side.  Default ``1.0``.
     :param tag: optional suffix appended to each plotted file stem (e.g.
         ``KM13`` -> ``base_<load>_plan_KM13.png``).  Absent/empty = no suffix.
+    :param steps: plot variants to render per load — a subset of
+        :data:`STEP_VARIANTS` (``absmax`` / ``max`` / ``min``).  ``None``
+        means ``("absmax",)`` — today's behavior.  ``max``/``min`` plot only
+        the envelope rows of that step (case-insensitive); stepless loads
+        skip them.  Filenames: abs-max keeps today's stem (and a split-CSV's
+        ``_<step>`` suffix); ``max``/``min`` naturally get ``_max``/``_min``
+        via the existing ``_single_step`` stem logic on the filtered frame.
     :returns: the list of written :class:`Path` objects.
     """
-    import matplotlib  # noqa: PLC0415
-    import matplotlib.pyplot as plt  # noqa: PLC0415
-
     comps = tuple(components) if components is not None else DEFAULT_COMPONENTS
     _validate_components(comps)
     units_def = _resolve_units(units, df)
+    steps_list = _normalize_steps(steps)
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -161,17 +175,114 @@ def plot_base_reactions(
     written: list[Path] = []
     if load_name is not None:
         single = df[df["load_name"] == load_name]
-        written.append(
-            _plot_one(single, out, load_name, comps, fmt=fmt, title=title,
-                      units_def=units_def, label_fontsize=label_fontsize,
-                      dynamic_size=dynamic_size, figsize=figsize, dpi=dpi,
-                      x_offset=x_offset, y_offset=y_offset, tag=tag)
+        written.extend(
+            _plot_steps(single, out, load_name, comps, steps=steps_list,
+                        fmt=fmt, title=title, units_def=units_def,
+                        label_fontsize=label_fontsize,
+                        dynamic_size=dynamic_size, figsize=figsize, dpi=dpi,
+                        x_offset=x_offset, y_offset=y_offset, tag=tag)
         )
         return written
 
     for name, grp in df.groupby("load_name", sort=True, dropna=False):
+        written.extend(
+            _plot_steps(grp, out, str(name), comps, steps=steps_list,
+                        fmt=fmt, title=title, units_def=units_def,
+                        label_fontsize=label_fontsize,
+                        dynamic_size=dynamic_size, figsize=figsize, dpi=dpi,
+                        x_offset=x_offset, y_offset=y_offset, tag=tag)
+        )
+    return written
+
+
+def _normalize_steps(steps: Sequence[str] | None) -> tuple[str, ...]:
+    """Validate/normalize a ``steps`` sequence against :data:`STEP_VARIANTS`.
+
+    ``None`` -> ``("absmax",)`` (today's behavior); entries are lowercased;
+    an unknown variant raises ``ValueError``; an empty sequence is treated as
+    ``None``."""
+    if steps is None:
+        return ("absmax",)
+    out = []
+    for s in steps:
+        t = str(s).strip().lower()
+        if t not in STEP_VARIANTS:
+            raise ValueError(
+                f"Unknown plot step variant {s!r}. Known: "
+                f"{', '.join(STEP_VARIANTS)}."
+            )
+        out.append(t)
+    return tuple(out) or ("absmax",)
+
+
+def _filter_step(df, step: str | None):
+    """Return ``df`` filtered to one plot step variant.
+
+    ``None``/``"absmax"`` returns ``df`` unchanged; ``"max"``/``"min"``
+    (case-insensitive) returns only the rows whose ``step_type`` equals it.
+    An unknown variant raises ``ValueError``.  Null/NaN ``step_type`` values
+    never match.  Mirrors ``_single_step``'s null-safe style."""
+    if step is None:
+        return df
+    s = str(step).strip().lower()
+    if s == "absmax":
+        return df
+    if s not in ("max", "min"):
+        raise ValueError(
+            f"Unknown plot step variant {step!r}. Known: "
+            f"{', '.join(STEP_VARIANTS)}."
+        )
+    if "step_type" not in df.columns:
+        return df.iloc[0:0]
+    mask = df["step_type"].apply(
+        lambda v: not _isna(v) and str(v).strip().lower() == s
+    )
+    return df[mask]
+
+
+def _plot_steps(
+    df,
+    out_dir: Path,
+    load_name: str,
+    comps: Sequence[str],
+    *,
+    steps: tuple[str, ...],
+    fmt: str,
+    title: str | None,
+    units_def: dict,
+    label_fontsize: float,
+    dynamic_size: bool = True,
+    figsize: tuple[float, float] | None = None,
+    dpi: int = 800,
+    x_offset: float = 1.0,
+    y_offset: float = 1.0,
+    tag: str | None = None,
+) -> list[Path]:
+    """Render one figure per requested step variant for a single load.
+
+    ``absmax`` keeps today's behavior exactly (including appending the empty
+    ``Path()`` placeholder when there is nothing to plot); ``max``/``min"
+    variants are skipped (debug log, no placeholder) when the filtered frame
+    is empty."""
+    written: list[Path] = []
+    for step in steps:
+        sub = _filter_step(df, step)
+        if sub is df:  # absmax — today's path, unchanged.
+            written.append(
+                _plot_one(df, out_dir, load_name, comps, fmt=fmt, title=title,
+                          units_def=units_def, label_fontsize=label_fontsize,
+                          dynamic_size=dynamic_size, figsize=figsize, dpi=dpi,
+                          x_offset=x_offset, y_offset=y_offset, tag=tag)
+            )
+            continue
+        if len(sub) == 0:
+            logger.debug("No %s-step rows for load %r; skipping plot.", step, load_name)
+            continue
+        # The filtered frame carries exactly one step, so _plot_one's existing
+        # _single_step stem logic and _build_title add the _max/_min suffix
+        # and "(Max)"/("Min") title with no naming code changes.
         written.append(
-            _plot_one(grp, out, str(name), comps, fmt=fmt, title=title,
+            _plot_one(sub, out_dir, load_name, comps, fmt=fmt, title=title,
                       units_def=units_def, label_fontsize=label_fontsize,
                       dynamic_size=dynamic_size, figsize=figsize, dpi=dpi,
                       x_offset=x_offset, y_offset=y_offset, tag=tag)
@@ -194,6 +305,7 @@ def plot_base_reactions_from_csv(
     x_offset: float = 1.0,
     y_offset: float = 1.0,
     tag: str | None = None,
+    steps: Sequence[str] | None = None,
 ) -> list[Path]:
     """Read a base-reaction CSV and plot it (no model / COM required).
 
@@ -203,6 +315,8 @@ def plot_base_reactions_from_csv(
     :param output_dir: where to write figures; defaults to the CSV's parent.
     :param units: unit system for display (see :func:`plot_base_reactions`).
     :param tag: optional suffix appended to each figure filename stem.
+    :param steps: plot variants (see :func:`plot_base_reactions`); ``None``
+        means ``("absmax",)``.
     :returns: the list of written :class:`Path` objects.
     :raises ValueError: when required columns are missing from the CSV.
     """
@@ -218,7 +332,7 @@ def plot_base_reactions_from_csv(
                                label_fontsize=label_fontsize,
                                dynamic_size=dynamic_size, figsize=figsize,
                                dpi=dpi, x_offset=x_offset, y_offset=y_offset,
-                               tag=tag)
+                               tag=tag, steps=steps)
 
 
 def _validate_components(comps: Sequence[str]) -> None:
@@ -259,7 +373,8 @@ def build_base_reactions_figure(
     figsize: tuple[float, float] | None = None,
     x_offset: float = 1.0,
     y_offset: float = 1.0,
-) -> "Figure | None":
+    step: str | None = None,
+) -> Figure | None:
     """Build (but **do not** save) one plan-view figure for a single load.
 
     This is the reusable drawing step shared by :func:`_plot_one` (which saves
@@ -290,6 +405,10 @@ def build_base_reactions_figure(
         the padding.
     :param y_offset: edge-label padding (inches): extra room added to the y
         axis limits on each side.  Default ``1.0``.
+    :param step: optional plot step variant (:data:`STEP_VARIANTS`);
+        ``None``/``"absmax"`` aggregates all rows max-|value| (today's
+        behavior), ``"max"``/``"min"`` plot only that envelope step's rows
+        (the title then gets the existing ``(Max)``/``(Min)`` suffix).
     """
     from matplotlib.figure import Figure  # noqa: PLC0415
 
@@ -297,9 +416,11 @@ def build_base_reactions_figure(
     _validate_components(comps)
     units_def = _resolve_units(units, df)
 
+    step_df = _filter_step(df, step)
+
     # Skip points with unresolved coordinates; never crash.  (x/y come from
     # the DataFrame where unresolvable coords were kept as NaN.)
-    valid = df[df["x"].notna() & df["y"].notna()]
+    valid = step_df[step_df["x"].notna() & step_df["y"].notna()]
     if len(valid) == 0:
         logger.warning("No plottable points for load %r; skipping figure.", load_name)
         return None
@@ -327,9 +448,11 @@ def build_base_reactions_figure(
                s=20, color="tab:blue", zorder=3)
     ax.set_aspect("equal", adjustable="box")
 
-    # Optional title enrichment: if every point shares one z, show it.
+    # Optional title enrichment: if every point shares one z, show it.  The
+    # (step-filtered) frame is used so a max/min variant gets the existing
+    # "(Max)"/"(Min)" suffix from _build_title; absmax keeps the plain name.
     used_title = title if title is not None else _build_title(
-        df, load_name, units_def)
+        step_df, load_name, units_def)
     if used_title:
         ax.set_title(used_title)
 
@@ -346,12 +469,12 @@ def build_base_reactions_figure(
             textcoords="offset points",
             fontsize=label_fontsize,
             family="monospace",
-            bbox=dict(
-                boxstyle="round,pad=0.1",
-                fc="white",
-                ec="gray",
-                alpha=0.9,
-            ),
+            bbox={
+                "boxstyle": "round,pad=0.1",
+                "fc": "white",
+                "ec": "gray",
+                "alpha": 0.9,
+            },
             zorder=4,
             annotation_clip=False,
             clip_on=False,
@@ -431,7 +554,6 @@ def _plot_one(
     tag: str | None = None,
 ) -> Path:
     """Render one plan-view figure for a single load and save + close it."""
-    import matplotlib  # noqa: PLC0415
     import matplotlib.pyplot as plt  # noqa: PLC0415
 
     comps_out = comps
@@ -643,7 +765,7 @@ def _fmt_plain(value: float) -> str:
         return str(value)
 
 
-def _source_unit_system(df) -> "UnitSystem":
+def _source_unit_system(df) -> UnitSystem:
     """Return the DataFrame's own unit system from its ``force_unit`` /
     ``length_unit`` columns.
 
@@ -658,8 +780,8 @@ def _source_unit_system(df) -> "UnitSystem":
             length = str(df["length_unit"].dropna().iloc[0])
             if force and length:
                 return UnitSystem(force, length)
-    except (IndexError, KeyError, AttributeError):
-        pass
+    except (IndexError, KeyError, AttributeError) as exc:
+        logger.debug("Could not read data units from DataFrame columns: %s", exc)
     return LEGACY_BASE
 
 
@@ -758,9 +880,6 @@ def build_frame_figure(
     Values are scaled: N \u2192 kN, N\u00b7mm \u2192 kN\u00b7m for display.
     Positive and negative regions are filled in green/red.
     """
-    import matplotlib  # noqa: PLC0415
-
-    matplotlib  # unused-import workaround
     import matplotlib.pyplot as plt  # noqa: PLC0415
 
     sub = df[(df["frame"] == frame) & (df["load_name"] == load_name)].copy()
@@ -777,7 +896,7 @@ def build_frame_figure(
     fig, axs = plt.subplots(3, 1, figsize=figsize, sharex=True)
     fig.subplots_adjust(hspace=0.35, left=0.08, right=0.95, top=0.94, bottom=0.06)
 
-    for ax, col in zip(axs, force_cols):
+    for ax, col in zip(axs, force_cols, strict=True):
         stations_m = sub["station"].values / 1000.0
         # Scale: N -> kN, N\u00b7mm -> kN\u00b7m
         if col in ("P", "V2", "V3"):
@@ -830,6 +949,7 @@ __all__ = [
     "COMPONENT_UNITS",
     "DEFAULT_UNITS",
     "UNITS",
+    "STEP_VARIANTS",
     "plot_base_reactions",
     "plot_base_reactions_from_csv",
     "build_base_reactions_figure",

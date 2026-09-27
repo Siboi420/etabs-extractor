@@ -153,6 +153,10 @@ CLI/API -> results.extract_base_reactions()
                              (one PNG per load) into the output dir after extraction
 --plot-csv <path>            standalone: read a base CSV and plot it (no COM/model; WSL-ok)
 --plot-format <fmt>          image format for --plot/--plot-csv (default png; e.g. pdf, svg)
+--plot-steps <v,v,...>       comma-separated plot variants for --plot/--plot-csv: absmax,max,min
+                             (default "absmax" — today's behavior). max/min plot only that
+                             envelope step's rows (stepless loads skip them; filenames get
+                             _max/_min) — see "Step variants" in README / plots.STEP_VARIANTS
 --units <unit>               plot display units: model/data (default; the CSV/DataFrame's own
                              force_unit/length_unit, unconverted), a named preset (kN-m, kN-mm,
                              N-mm, tonf-m, kgf-m), or any "<force>-<length>" pair (e.g. tonf-mm)
@@ -298,7 +302,11 @@ rebuild) — nothing else depends on it beyond those two console wrappers.
   labelled-entry format), and `etabs_extractor.units`'s conversion factors; also imports
   `gui.app` / `gui.runner` / `gui.widgets.preview` / `gui.widgets.plot_settings` to
   confirm they import with no display — this DOES require `customtkinter` installed,
-  since those modules import it at module level).
+  since those modules import it at module level). Also covers the step-variant
+  plotting: `plot_base_reactions(steps=...)` file sets per envelope/stepless load,
+  invalid-variant `ValueError`s, `build_base_reactions_figure(step=...)` label-text
+  filtering (Max-only vs abs-max), and the `service.save_batch_plots` target-dir
+  fallback chain.
 - **GUI headed smoke test (needs a real display, e.g. WSLg):**
   `MPLBACKEND=Agg python etabs_extractor/tests/test_gui_smoke.py` → expect `PASSED`
   (prints `SKIPPED (no display)` and exits cleanly with none). Builds the real
@@ -309,7 +317,11 @@ rebuild) — nothing else depends on it beyond those two console wrappers.
   window is withdrawn); round-trips a units change through the units hint + elevation
   combobox labels; toggles the mode switch and asserts the base/frame filter containers
   and preview panels swap via pack/grid visibility; feeds a synthetic base-reaction
-  result into `BasePreviewPanel` and asserts a figure renders. No
+  result into `BasePreviewPanel` and asserts a figure renders; exercises the
+  base preview's **Step** dropdown (envelope data re-renders Max-only labels,
+  stepless data falls back to abs max) and the **Batch save plots** wiring
+  (`batch_saver == app._on_batch_save`), and round-trips the **Batch plot
+  dir** through `_collect_settings` in both modes. No
   COM/ETABS/matplotlib-in-Windows-Python involved.
 - **Plot smoke (no COM, WSL):** `python -m etabs_extractor --plot-csv <dir>/all_base_reactions.csv`
   → expect a `base_<load>_plan.png` next to the CSV for each load. With
@@ -317,6 +329,8 @@ rebuild) — nothing else depends on it beyond those two console wrappers.
   Split CSVs plot to step-suffixed figures: `--plot-csv <dir>/base_combo_ASD_Max_min.csv`
   → `base_ASD_Max_plan_min.png` (title `ASD Max (Min)`); the `_max.csv` →
   `base_ASD_Max_plan_max.png` (distinct file, no overwrite).
+  With `--plot-steps absmax,max,min` every envelope load yields three files
+  (`base_<load>_plan.png`, `_max`, `_min`); stepless loads yield one.
 - **pi-lens:** run diagnostics on edited files; the two known rules to respect
   are `unchecked-throwing-call-python` (int/float/open) and `python-empty-except`
   (no bare `pass`).
@@ -449,6 +463,40 @@ re-appliable:
   df, `all_base_reactions.csv`, the mixed per-load CSV) keep today's names and
   titles exactly.  `--plot-csv` / `plot_base_reactions_from_csv` / GUI "Load
   preview" accept the split CSVs unchanged (same `BASE_COLUMNS` schema).
+
+**Step variants for plots (abs-max / Max / Min):**
+
+- `plots.STEP_VARIANTS = ("absmax", "max", "min")` (re-exported from
+  `__init__.py`).  `plots._filter_step(df, step)` returns `df` unchanged for
+  `None`/`absmax` and, for `max`/`min` (case-insensitive), only the rows whose
+  `step_type` equals it (null/NaN never match; unknown variant →
+  `ValueError` naming the known list).  `plots._normalize_steps()` validates a
+  `steps` sequence (`None`/empty → `("absmax",)`).
+- `build_base_reactions_figure(..., step=None)` filters via `_filter_step`
+  before the plottable check, and builds the title from the (step-filtered)
+  frame so a max/min variant gets the existing `(Max)`/`(Min)` suffix;
+  `plot_base_reactions(..., steps=None)` and
+  `plot_base_reactions_from_csv(..., steps=None)` render one figure per load
+  per variant — the abs-max path is byte-identical to before (including the
+  `Path()` placeholder return), empty filtered frames are skipped with a
+  debug log and no placeholder.  No naming code changed: the filtered frame
+  carries exactly one `step_type`, so the existing `_single_step` stem logic
+  and `_build_title` produce `base_<load>_plan_max.<fmt>` / `_min` + `(Max)`/
+  `(Min)` titles naturally.
+- CLI `--plot-steps absmax,max,min` (default `absmax`) threads `steps=` into
+  both `--plot` and `--plot-csv`; an unknown variant raises `ValueError`
+  surfaced by the CLI's existing plot error handling (exit 2/3 with a clear
+  message).
+- GUI: the base preview's **Step** dropdown (`Abs max`/`Max`/`Min`,
+  `gui.state.STEP_CHOICES`, mapped via `preview._STEP_VARIANT`) re-renders on
+  change through `app._build_preview_figure(df, load, settings, step=...)`;
+  an empty step selection falls back to abs-max with a log note ("No Max
+  steps for `<load>` — showing abs max").  The **Batch save plots...** button
+  calls `service.save_batch_plots(result, settings)` via the background
+  runner: it writes all three variants for **every load of the current
+  result** into the sidebar's **Batch plot dir** (`GuiSettings.batch_plot_dir`;
+  blank → Output dir for an extraction result, Plot output dir / CSV parent
+  for a CSV-loaded result) and logs "Saved N plot(s) to `<dir>`".
 
 **Preview Refresh + auto-render (`gui/widgets/preview.py`):**
 
