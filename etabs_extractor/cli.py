@@ -16,6 +16,7 @@ import argparse
 import sys
 
 from . import units as _units
+from .plots import COMPONENT_COLUMNS as _COMPONENT_COLUMNS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -172,6 +173,36 @@ def build_parser() -> argparse.ArgumentParser:
         "--plot-csv.",
     )
     parser.add_argument(
+        "--components",
+        nargs="*",
+        default=None,
+        metavar="COMP",
+        choices=list(_COMPONENT_COLUMNS),
+        help="Reaction components shown in each point's label (applies to "
+        "--plot and --plot-csv). Choices: "
+        + ", ".join(_COMPONENT_COLUMNS)
+        + ". Default: Fz M2 M3. Empty selection renders point-number-only "
+        "labels.",
+    )
+    parser.add_argument(
+        "--label-dx",
+        type=float,
+        default=-6.0,
+        metavar="PTS",
+        help="Label offset from its marker, in points, x direction "
+        "(default -6). Position only — distinct from --units-independent "
+        "X/Y edge padding in inches. Applies to --plot / --plot-csv.",
+    )
+    parser.add_argument(
+        "--label-dy",
+        type=float,
+        default=-18.0,
+        metavar="PTS",
+        help="Label offset from its marker, in points, y direction "
+        "(default -18). Position only — distinct from the X/Y edge padding "
+        "in inches. Applies to --plot / --plot-csv.",
+    )
+    parser.add_argument(
         "--tag",
         metavar="NAME",
         help="Append `_NAME` to every CSV and plot filename; sanitized to a "
@@ -203,6 +234,9 @@ def main(argv: list[str] | None = None) -> int:
                 args.plot_csv,
                 fmt=args.plot_format,
                 units=args.units,
+                components=args.components,
+                label_dx=args.label_dx,
+                label_dy=args.label_dy,
                 tag=args.tag,
                 steps=[s.strip() for s in args.plot_steps.split(",") if s.strip()],
             )
@@ -283,6 +317,8 @@ def main(argv: list[str] | None = None) -> int:
 
                     plot_paths = plot_base_reactions(
                         df, plot_dir, fmt=args.plot_format, units=args.units,
+                        components=args.components,
+                        label_dx=args.label_dx, label_dy=args.label_dy,
                         tag=args.tag,
                         steps=[s.strip() for s in args.plot_steps.split(",") if s.strip()],
                     )

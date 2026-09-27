@@ -62,6 +62,10 @@ class GuiSettings:
     label_fontsize: float = 2.4
     x_offset: float = 1.0
     y_offset: float = 1.0
+    # Label offset from its marker (points) + which components each label shows.
+    label_dx: float = -6.0
+    label_dy: float = -18.0
+    label_components: list[str] = field(default_factory=lambda: ["Fz", "M2", "M3"])
     units: str = "data"
     format: str = "png"
 

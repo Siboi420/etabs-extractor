@@ -115,6 +115,8 @@ def plot_base_reactions(
     dpi: int = 800,
     x_offset: float = 1.0,
     y_offset: float = 1.0,
+    label_dx: float = -6.0,
+    label_dy: float = -18.0,
     tag: str | None = None,
     steps: Sequence[str] | None = None,
 ) -> list[Path]:
@@ -153,6 +155,10 @@ def plot_base_reactions(
         box border never cuts through a label).  Default ``1.0``.
     :param y_offset: edge-label padding (inches): extra room added to the y
         axis limits on each side.  Default ``1.0``.
+    :param label_dx: label offset from its marker in points (x direction;
+        default ``-6.0``).
+    :param label_dy: label offset from its marker in points (y direction;
+        default ``-18.0``).
     :param tag: optional suffix appended to each plotted file stem (e.g.
         ``KM13`` -> ``base_<load>_plan_KM13.png``).  Absent/empty = no suffix.
     :param steps: plot variants to render per load — a subset of
@@ -180,7 +186,8 @@ def plot_base_reactions(
                         fmt=fmt, title=title, units_def=units_def,
                         label_fontsize=label_fontsize,
                         dynamic_size=dynamic_size, figsize=figsize, dpi=dpi,
-                        x_offset=x_offset, y_offset=y_offset, tag=tag)
+                        x_offset=x_offset, y_offset=y_offset,
+                        label_dx=label_dx, label_dy=label_dy, tag=tag)
         )
         return written
 
@@ -190,7 +197,8 @@ def plot_base_reactions(
                         fmt=fmt, title=title, units_def=units_def,
                         label_fontsize=label_fontsize,
                         dynamic_size=dynamic_size, figsize=figsize, dpi=dpi,
-                        x_offset=x_offset, y_offset=y_offset, tag=tag)
+                        x_offset=x_offset, y_offset=y_offset,
+                        label_dx=label_dx, label_dy=label_dy, tag=tag)
         )
     return written
 
@@ -256,6 +264,8 @@ def _plot_steps(
     dpi: int = 800,
     x_offset: float = 1.0,
     y_offset: float = 1.0,
+    label_dx: float = -6.0,
+    label_dy: float = -18.0,
     tag: str | None = None,
 ) -> list[Path]:
     """Render one figure per requested step variant for a single load.
@@ -272,7 +282,8 @@ def _plot_steps(
                 _plot_one(df, out_dir, load_name, comps, fmt=fmt, title=title,
                           units_def=units_def, label_fontsize=label_fontsize,
                           dynamic_size=dynamic_size, figsize=figsize, dpi=dpi,
-                          x_offset=x_offset, y_offset=y_offset, tag=tag)
+                          x_offset=x_offset, y_offset=y_offset,
+                          label_dx=label_dx, label_dy=label_dy, tag=tag)
             )
             continue
         if len(sub) == 0:
@@ -285,7 +296,8 @@ def _plot_steps(
             _plot_one(sub, out_dir, load_name, comps, fmt=fmt, title=title,
                       units_def=units_def, label_fontsize=label_fontsize,
                       dynamic_size=dynamic_size, figsize=figsize, dpi=dpi,
-                      x_offset=x_offset, y_offset=y_offset, tag=tag)
+                      x_offset=x_offset, y_offset=y_offset,
+                      label_dx=label_dx, label_dy=label_dy, tag=tag)
         )
     return written
 
@@ -304,6 +316,8 @@ def plot_base_reactions_from_csv(
     dpi: int = 800,
     x_offset: float = 1.0,
     y_offset: float = 1.0,
+    label_dx: float = -6.0,
+    label_dy: float = -18.0,
     tag: str | None = None,
     steps: Sequence[str] | None = None,
 ) -> list[Path]:
@@ -332,6 +346,7 @@ def plot_base_reactions_from_csv(
                                label_fontsize=label_fontsize,
                                dynamic_size=dynamic_size, figsize=figsize,
                                dpi=dpi, x_offset=x_offset, y_offset=y_offset,
+                               label_dx=label_dx, label_dy=label_dy,
                                tag=tag, steps=steps)
 
 
@@ -373,6 +388,8 @@ def build_base_reactions_figure(
     figsize: tuple[float, float] | None = None,
     x_offset: float = 1.0,
     y_offset: float = 1.0,
+    label_dx: float = -6.0,
+    label_dy: float = -18.0,
     step: str | None = None,
 ) -> Figure | None:
     """Build (but **do not** save) one plan-view figure for a single load.
@@ -405,6 +422,10 @@ def build_base_reactions_figure(
         the padding.
     :param y_offset: edge-label padding (inches): extra room added to the y
         axis limits on each side.  Default ``1.0``.
+    :param label_dx: label offset from its marker in points (x direction;
+        default ``-6.0``).
+    :param label_dy: label offset from its marker in points (y direction;
+        default ``-18.0``).
     :param step: optional plot step variant (:data:`STEP_VARIANTS`);
         ``None``/``"absmax"`` aggregates all rows max-|value| (today's
         behavior), ``"max"``/``"min"`` plot only that envelope step's rows
@@ -465,7 +486,7 @@ def build_base_reactions_figure(
         ax.annotate(
             label,
             (row["x"] / len_scale, row["y"] / len_scale),
-            xytext=(-6, -18),
+            xytext=(label_dx, label_dy),
             textcoords="offset points",
             fontsize=label_fontsize,
             family="monospace",
@@ -551,6 +572,8 @@ def _plot_one(
     dpi: int = 800,
     x_offset: float = 1.0,
     y_offset: float = 1.0,
+    label_dx: float = -6.0,
+    label_dy: float = -18.0,
     tag: str | None = None,
 ) -> Path:
     """Render one plan-view figure for a single load and save + close it."""
@@ -561,6 +584,7 @@ def _plot_one(
         df, load_name, components=comps_out, title=title, units=units_def,
         label_fontsize=label_fontsize, dynamic_size=dynamic_size,
         figsize=figsize, x_offset=x_offset, y_offset=y_offset,
+        label_dx=label_dx, label_dy=label_dy,
     )
     if fig is None:
         return Path()

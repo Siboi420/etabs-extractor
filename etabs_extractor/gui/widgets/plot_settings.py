@@ -13,6 +13,9 @@ import customtkinter as ctk
 from etabs_extractor.gui.state import FORMATS, UNITS_CHOICES, GuiSettings
 from etabs_extractor.gui.widgets.fields import Section
 
+# Label-component checkbox order (canonical COMPONENT_COLUMNS order).
+COMPONENT_CHECKBOXES = ("Fx", "Fy", "Fz", "M1", "M2", "M3")
+
 
 class PlotSettingsFrame(Section):
     """A titled card hosting all plot-appearance controls."""
@@ -83,6 +86,29 @@ class PlotSettingsFrame(Section):
         )
         self.format_menu.grid(row=8, column=1, sticky="w", padx=2, pady=2)
 
+        # Label components: which reaction values each point's label shows.
+        # Empty selection -> point-number-only labels (documented behavior).
+        label_components = self._settings.label_components or []
+        self.label_comp_vars: dict[str, ctk.BooleanVar] = {}
+        comp_row = ctk.CTkFrame(body, fg_color="transparent")
+        comp_row.grid(row=9, column=0, columnspan=2, sticky="w", padx=4, pady=(2, 2))
+        ctk.CTkLabel(comp_row, text="Label:", anchor="w").pack(side="left", padx=(8, 2))
+        for name in COMPONENT_CHECKBOXES:
+            var = ctk.BooleanVar(value=name in label_components)
+            self.label_comp_vars[name] = var
+            ctk.CTkCheckBox(comp_row, text=name, variable=var, width=52).pack(side="left", padx=1)
+
+        # Label offset from its marker (points) — position only, distinct
+        # from the X/Y edge padding above (inches).
+        self.label_dx_var = ctk.StringVar(value=str(self._settings.label_dx))
+        self.label_dy_var = ctk.StringVar(value=str(self._settings.label_dy))
+        ctk.CTkLabel(body, text="Label dx (pts)", anchor="e", width=100).grid(row=10, column=0, sticky="e", padx=(8, 2), pady=2)
+        self.label_dx_entry = ctk.CTkEntry(body, textvariable=self.label_dx_var, width=90)
+        self.label_dx_entry.grid(row=10, column=1, sticky="w", padx=2, pady=2)
+        ctk.CTkLabel(body, text="Label dy (pts)", anchor="e", width=100).grid(row=11, column=0, sticky="e", padx=(8, 2), pady=2)
+        self.label_dy_entry = ctk.CTkEntry(body, textvariable=self.label_dy_var, width=90)
+        self.label_dy_entry.grid(row=11, column=1, sticky="w", padx=2, pady=2)
+
         self._sync_dim_enabled()
 
     def _sync_dim_enabled(self) -> None:
@@ -103,6 +129,11 @@ class PlotSettingsFrame(Section):
         s.y_offset = parse_float(self.y_offset_var.get(), s.y_offset)
         s.units = self.units_var.get() if self.units_var.get() in UNITS_CHOICES else s.units
         s.format = self.format_var.get() if self.format_var.get() in FORMATS else s.format
+        s.label_dx = parse_float(self.label_dx_var.get(), s.label_dx)
+        s.label_dy = parse_float(self.label_dy_var.get(), s.label_dy)
+        s.label_components = [
+            name for name in COMPONENT_CHECKBOXES if self.label_comp_vars[name].get()
+        ]
         return s
 
     def from_settings(self, settings: GuiSettings) -> None:
@@ -115,4 +146,8 @@ class PlotSettingsFrame(Section):
         self.y_offset_var.set(str(settings.y_offset))
         self.units_var.set(settings.units)
         self.format_var.set(settings.format)
+        self.label_dx_var.set(str(settings.label_dx))
+        self.label_dy_var.set(str(settings.label_dy))
+        for name, var in self.label_comp_vars.items():
+            var.set(name in (settings.label_components or []))
         self._sync_dim_enabled()

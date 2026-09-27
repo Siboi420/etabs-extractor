@@ -17,6 +17,7 @@ from etabs_extractor.gui.state import (
     parse_elevation,
 )
 from etabs_extractor.io import _sanitize_filename
+from etabs_extractor.plots import COMPONENT_COLUMNS
 
 
 def build_mode_kwargs(settings: GuiSettings) -> dict:
@@ -68,6 +69,11 @@ def build_extract_kwargs(settings: GuiSettings) -> dict:
     return build_mode_kwargs(settings)
 
 
+def _label_components(settings: GuiSettings) -> tuple[str, ...]:
+    """Ticked label components in canonical COMPONENT_COLUMNS order."""
+    return tuple(c for c in COMPONENT_COLUMNS if c in (settings.label_components or []))
+
+
 def build_plot_kwargs(settings: GuiSettings) -> dict:
     """Return the keyword arguments for ``plot_base_reactions``."""
     figsize = None
@@ -82,6 +88,9 @@ def build_plot_kwargs(settings: GuiSettings) -> dict:
         "dpi": settings.dpi,
         "x_offset": settings.x_offset,
         "y_offset": settings.y_offset,
+        "label_dx": settings.label_dx,
+        "label_dy": settings.label_dy,
+        "components": _label_components(settings),
         "tag": settings.tag or None,
     }
 
@@ -98,6 +107,9 @@ def build_figure_kwargs(settings: GuiSettings) -> dict:
         "figsize": figsize,
         "x_offset": settings.x_offset,
         "y_offset": settings.y_offset,
+        "label_dx": settings.label_dx,
+        "label_dy": settings.label_dy,
+        "components": _label_components(settings),
     }
 
 
@@ -200,7 +212,7 @@ def load_from_csv(settings: GuiSettings) -> dict:
         raise ValueError("No CSV file selected.")
 
     df = pd.read_csv(csv_path, encoding="utf-8")
-    per_load = {name: grp for name, grp in df.groupby("load_name", sort=True)}
+    per_load = {str(name): grp for name, grp in df.groupby("load_name", sort=True)}
 
     plot_paths = []
     if settings.plot_after_extract:
@@ -209,10 +221,10 @@ def load_from_csv(settings: GuiSettings) -> dict:
         plot_paths = plot_base_reactions_from_csv(
             csv_path,
             (settings.plot_output_dir or "").strip() or None,
-            components=None,
             **{k: v for k, v in build_plot_kwargs(settings).items()
                if k in ("fmt", "units", "label_fontsize", "dynamic_size",
-                        "figsize", "dpi", "tag")},
+                        "figsize", "dpi", "tag", "label_dx", "label_dy",
+                        "components")},
         )
 
     return {

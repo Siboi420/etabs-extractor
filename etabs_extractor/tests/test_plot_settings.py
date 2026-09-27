@@ -443,6 +443,110 @@ def test_inspect_active_model_fake():
     print("inspect_active_model (fake) OK")
 
 
+def test_build_figure_label_offsets():
+    """label_dx/label_dy become the annotation's offset-points position;
+    defaults reproduce the historical (-6, -18)."""
+    df = _sample_df()
+    fig = build_base_reactions_figure(
+        df, "ASD 1", dynamic_size=False, figsize=(12, 6),
+        label_dx=10, label_dy=0,
+    )
+    assert fig is not None
+    for ann in fig.axes[0].texts:
+        # get_position() == the offset-points tuple (Annotation.xyann) for
+        # textcoords="offset points".
+        assert ann.get_position() == (10.0, 0.0), ann.get_position()
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+    default = build_base_reactions_figure(
+        df, "ASD 1", dynamic_size=False, figsize=(12, 6),
+    )
+    assert default is not None
+    for ann in default.axes[0].texts:
+        assert ann.get_position() == (-6.0, -18.0), ann.get_position()
+    plt.close(default)
+    print("build_base_reactions_figure label offsets OK")
+
+
+def test_build_figure_label_components():
+    """components selects the label's value lines; empty -> point number only."""
+    df = _sample_df()
+    fig = build_base_reactions_figure(
+        df, "ASD 1", dynamic_size=False, figsize=(12, 6), components=("Fz", "Fx"),
+    )
+    assert fig is not None
+    for ann in fig.axes[0].texts:
+        assert "Fx=" in ann.get_text(), ann.get_text()
+        assert "Fz=" in ann.get_text(), ann.get_text()
+        assert "M2=" not in ann.get_text(), ann.get_text()
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+    default = build_base_reactions_figure(
+        df, "ASD 1", dynamic_size=False, figsize=(12, 6),
+    )
+    assert default is not None
+    for ann in default.axes[0].texts:
+        assert "Fx=" not in ann.get_text(), ann.get_text()
+        assert "Fz=" in ann.get_text(), ann.get_text()
+    plt.close(default)
+    empty = build_base_reactions_figure(
+        df, "ASD 1", dynamic_size=False, figsize=(12, 6), components=(),
+    )
+    assert empty is not None
+    for ann in empty.axes[0].texts:
+        assert ann.get_text().strip() in {"1", "2"}, ann.get_text()
+    plt.close(empty)
+    print("build_base_reactions_figure label components OK")
+
+
+def test_plot_base_reactions_label_kwargs():
+    """label_dx/label_dy/components thread through plot_base_reactions (incl.
+    a steps variant) and write non-empty files."""
+    df = _envelope_df()
+    with tempfile.TemporaryDirectory() as td:
+        paths = plot_base_reactions(
+            df, td, dpi=100, dynamic_size=False, figsize=(12, 6),
+            label_dx=8, label_dy=-4, components=("Fz",),
+            steps=("absmax", "max"),
+        )
+        paths = [p for p in paths if str(p)]
+        assert paths, paths
+        for p in paths:
+            assert p.exists() and p.stat().st_size > 0, p
+    print("plot_base_reactions label kwargs threaded OK")
+
+
+def test_service_label_kwargs_and_csv_filter():
+    """build_plot_kwargs / build_figure_kwargs expose the three new keys in
+    canonical component order, and the CSV plot path's key filter passes
+    them through (end-to-end: writes non-empty files)."""
+    s = GuiSettings(label_dx=5.0, label_dy=-2.5,
+                    label_components=["M2", "Fz"])
+    kw = service.build_plot_kwargs(s)
+    assert kw["label_dx"] == 5.0
+    assert kw["label_dy"] == -2.5
+    assert kw["components"] == ("Fz", "M2")  # canonical order
+    fk = service.build_figure_kwargs(s)
+    assert fk["label_dx"] == 5.0
+    assert fk["label_dy"] == -2.5
+    assert fk["components"] == ("Fz", "M2")
+    # Deselect-all -> empty tuple (point-number-only labels).
+    assert service.build_plot_kwargs(GuiSettings(label_components=[]))["components"] == ()
+    # End-to-end CSV path: build a temp CSV and load_from_csv with plotting.
+    df = _sample_df()
+    with tempfile.TemporaryDirectory() as td:
+        csv_path = Path(td) / "all_base_reactions.csv"
+        df.to_csv(csv_path, index=False, encoding="utf-8")
+        s2 = GuiSettings(csv_path=str(csv_path), plot_after_extract=True,
+                         label_dx=8.0, label_dy=0.0,
+                         label_components=["Fz"])
+        result = service.load_from_csv(s2)
+        assert result["plot_paths"], result["plot_paths"]
+        for p in result["plot_paths"]:
+            assert p.exists() and p.stat().st_size > 0, p
+    print("service label kwargs + CSV filter passthrough OK")
+
+
 def test_service_plot_kwargs_mapping():
     s = GuiSettings(dynamic_size=False, fig_width=12.0, fig_height=6.0,
                     dpi=300, label_fontsize=3, units="kN-m", format="svg",
@@ -480,7 +584,7 @@ def test_state_parsing():
     assert parse_elevation("1900  (+ 1.90, 60 pts)") == 1900.0
     try:
         parse_elevation("not-a-number")
-        assert False, "expected ValueError"
+        raise AssertionError("expected ValueError")
     except ValueError as exc:
         # Expected: raise the value through to assert the error propagated.
         assert "Invalid elevation" in str(exc)
@@ -625,13 +729,13 @@ def test_plot_steps_invalid_variant_raises():
     df = _envelope_df()
     try:
         build_base_reactions_figure(df, "ENV", step="bogus")
-        assert False, "expected ValueError"
+        raise AssertionError("expected ValueError")
     except ValueError as exc:
         assert "absmax" in str(exc), str(exc)
     with tempfile.TemporaryDirectory() as td:
         try:
             plot_base_reactions(df, td, steps=["absmax", "nope"])
-            assert False, "expected ValueError"
+            raise AssertionError("expected ValueError")
         except ValueError as exc:
             assert "nope" in str(exc), str(exc)
     print("invalid step variant -> ValueError OK")
@@ -714,7 +818,7 @@ def test_save_batch_plots():
     # 4. Nothing configured -> clear ValueError.
     try:
         service.save_batch_plots({"df": df, "output_dir": None}, GuiSettings(dpi=100))
-        assert False, "expected ValueError"
+        raise AssertionError("expected ValueError")
     except ValueError as exc:
         assert "Batch plot" in str(exc) or "batch plot" in str(exc), str(exc)
     print("service.save_batch_plots fallback chain OK")
@@ -726,6 +830,10 @@ def run():
     test_offsets_expand_axis_limits_not_canvas()
     test_build_figure_zero_offset_reproduces_base()
     test_plot_base_reactions_offset_threading()
+    test_build_figure_label_offsets()
+    test_build_figure_label_components()
+    test_plot_base_reactions_label_kwargs()
+    test_service_label_kwargs_and_csv_filter()
     test_build_figure_dynamic_size()
     test_build_figure_dynamic_offset_limits()
     test_build_figure_none_for_no_points()

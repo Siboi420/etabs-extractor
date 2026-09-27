@@ -160,6 +160,14 @@ CLI/API -> results.extract_base_reactions()
 --units <unit>               plot display units: model/data (default; the CSV/DataFrame's own
                              force_unit/length_unit, unconverted), a named preset (kN-m, kN-mm,
                              N-mm, tonf-m, kgf-m), or any "<force>-<length>" pair (e.g. tonf-mm)
+--components <c,c,...>       reaction components shown in each point's label (applies to
+                             --plot/--plot-csv): Fx Fy Fz M1 M2 M3 (argparse choices; default
+                             Fz M2 M3). Empty selection -> point-number-only labels
+--label-dx <pts>             label offset from its marker, points, x dir (default -6);
+                             applies to --plot/--plot-csv. POSITION offset — distinct from
+                             the X/Y edge padding (inches)
+--label-dy <pts>             label offset from its marker, points, y dir (default -18);
+                             same scope as --label-dx
 --tag <name>                 append `_<name>` to EVERY CSV and plot filename (sanitized suffix;
                              absence/empty/whitespace = no suffix)
 ```
@@ -306,7 +314,13 @@ rebuild) — nothing else depends on it beyond those two console wrappers.
   plotting: `plot_base_reactions(steps=...)` file sets per envelope/stepless load,
   invalid-variant `ValueError`s, `build_base_reactions_figure(step=...)` label-text
   filtering (Max-only vs abs-max), and the `service.save_batch_plots` target-dir
-  fallback chain.
+  fallback chain. Also covers the editable label settings:
+  `build_base_reactions_figure(label_dx=..., label_dy=...)` annotation offsets
+  (via `get_position()`, defaults `(-6, -18)`), label component content
+  (`components=("Fz", "Fx")` adds an `Fx=` line; `()` = point-number-only),
+  `plot_base_reactions` label-kwarg threading (incl. a steps variant), and
+  `service.build_plot_kwargs`/`build_figure_kwargs` `label_dx`/`label_dy`/
+  `components` mapping + the CSV plot path's key-filter passthrough.
 - **GUI headed smoke test (needs a real display, e.g. WSLg):**
   `MPLBACKEND=Agg python etabs_extractor/tests/test_gui_smoke.py` → expect `PASSED`
   (prints `SKIPPED (no display)` and exits cleanly with none). Builds the real
@@ -535,8 +549,13 @@ compatible, defaults unchanged):
   border never cuts through a label. The figure size stays exactly the base
   size (dynamic or fixed); pass `x_offset=0, y_offset=0` for no extra
   padding.
+- **`label_dx: float = -6.0` / `label_dy: float = -18.0`** — the label's
+  offset from its marker, in **points** (`xytext=(label_dx, label_dy)` with
+  `textcoords="offset points"`, replacing the hardcoded `(-6, -18)`).
+  Position only — distinct from the inch-based x/y edge padding above.
 - Threaded through `plot_base_reactions`, `plot_base_reactions_from_csv`,
-  and the new `build_base_reactions_figure`.
+  and the new `build_base_reactions_figure` (all three also take the
+  existing `components` param, validated by `_validate_components`).
 
 `build_base_reactions_figure(df, load_name, *, components, title, units,
 label_fontsize, dynamic_size, figsize, x_offset, y_offset) -> Figure | None`
@@ -597,7 +616,11 @@ GUI layout/behaviour (full detail in `service.py` / `app.py`):
   when dynamic), **X/Y label offset (in)** fields (default 1.0 each — extra
   axis-limit padding so edge labels render inside the axes box), dpi
   (default 800), label font size (default 2.4), units
-  (`model`/`kN-m`), format (`png`/`pdf`/`svg`). "Plot after extract".
+  (`model`/`kN-m`), format (`png`/`pdf`/`svg`), **Label** component
+  checkboxes (`Fx Fy Fz M1 M2 M3`, default `Fz M2 M3` — which reaction
+  values each point's label shows) and **Label dx/dy (pts)** entries
+  (defaults `-6`/`-18` — the label's offset from its marker, in points).
+  "Plot after extract".
 - **CSV section (no ETABS)**: CSV file + Browse + "Load preview".
 - **Plot preview pop-up (manual)**: a separate `tk.Toplevel`
   (`PlotPreviewWindow` in `gui/widgets/preview.py`) hosts the load dropdown
@@ -667,6 +690,46 @@ interactive checklist, and let **combos and cases be extracted together**:
 - **Label offsets**: see the "Plot appearance" bullet in the GUI section above
   for the `x_offset` / `y_offset` params and the axis-limit padding layout in
   `build_base_reactions_figure`.
+
+### Completed: editable label contents + offsets (components, label_dx/label_dy)
+
+The per-point label boxes on base-reaction plan plots are configurable in
+content and placement (defaults reproduce the historical rendering exactly):
+
+- **Library** (`plots.py`): `build_base_reactions_figure`,
+  `plot_base_reactions`, and `plot_base_reactions_from_csv` gained
+  `label_dx: float = -6.0` / `label_dy: float = -18.0` — threaded through
+  `_plot_steps` / `_plot_one` to the annotation's
+  `xytext=(label_dx, label_dy)` (was hardcoded `(-6, -18)`). The existing
+  `components` param (validated by `_validate_components` against
+  `COMPONENT_COLUMNS`) was already supported by the library; an empty
+  selection renders point-number-only labels (`_format_label` behavior —
+  intentional and documented, no special-casing).
+- **CLI** (`cli.py`): `--components Fz M2 M3` (nargs `*`, choices from
+  `COMPONENT_COLUMNS`, default `None` = library default) and
+  `--label-dx` / `--label-dy` (floats, defaults `-6`/`-18`), applied to both
+  `--plot` and `--plot-csv`. The flags are **position** offsets (points),
+  distinct from the inch-based X/Y edge padding.
+- **GUI**: `GuiSettings` gained `label_dx`/`label_dy` (floats) and
+  `label_components: list[str]` (default `Fz M2 M3`);
+  `PlotSettingsFrame` renders six canonical-order checkboxes
+  (`COMPONENT_CHECKBOXES` in `gui/widgets/plot_settings.py`) plus
+  dx/dy entries (`parse_float` fallback-on-invalid, same as the other
+  numeric fields); `service._label_components()` normalizes the ticked set
+  to canonical `COMPONENT_COLUMNS` order, and `build_plot_kwargs` /
+  `build_figure_kwargs` pass `label_dx`/`label_dy`/`components` through —
+  so the preview, Refresh, plot-after-extract, CSV plotting, and Batch save
+  plots all pick them up automatically. `load_from_csv`'s key filter for
+  `plot_base_reactions_from_csv` now also passes the three new keys
+  (its `components=None` hardcode was removed).
+- **Tests** (`tests/test_plot_settings.py`): label-offset assertion
+  (`get_position()` — an `Annotation.xyann` alias — equals the offset tuple;
+  defaults `(-6, -18)`), component-content assertion (an `Fx=` line appears
+  with `components=("Fz", "Fx")`, absent by default, point-number-only with
+  `components=()`), `plot_base_reactions` threading incl. a steps variant,
+  and `service.build_plot_kwargs`/`build_figure_kwargs` mapping + the CSV
+  path's key-filter passthrough (end-to-end via `load_from_csv` on a temp
+  CSV).
 
 ### Completed: plan-view plotting of base reactions
 
