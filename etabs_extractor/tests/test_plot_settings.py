@@ -424,7 +424,7 @@ def test_load_selection_model():
 
 
 def test_inspect_active_model_fake():
-    """inspect_active_model with an injected fake session returns model path + 
+    """inspect_active_model with an injected fake session returns model path +
     combos + cases."""
     class _Fake:
         def get_model_filename(self, include_path=True):
@@ -824,6 +824,49 @@ def test_save_batch_plots():
     print("service.save_batch_plots fallback chain OK")
 
 
+def test_save_batch_plots_steps_selection():
+    """service.save_batch_plots honors settings.plot_steps: only the selected
+    variants' files are written; empty selection raises a clear ValueError;
+    default settings keep all three variants (regression guard)."""
+    df = _envelope_df()
+    result = {"df": df, "output_dir": None, "load_names": ["ENV", "DL"]}
+
+    # 1. Default settings -> all three variants (absmax x2 loads + max + min).
+    with tempfile.TemporaryDirectory() as td:
+        paths = service.save_batch_plots(
+            result, GuiSettings(batch_plot_dir=td, dpi=100))
+        names = [p.name for p in paths]
+        assert len(paths) == 4, names
+        assert any("_plan_max.png" in n for n in names) and any(
+            "_plan_min.png" in n for n in names), names
+
+    # 2. Only absmax -> no _max/_min step-split files.
+    with tempfile.TemporaryDirectory() as td:
+        paths = service.save_batch_plots(
+            result, GuiSettings(batch_plot_dir=td, dpi=100, plot_steps=["absmax"]))
+        names = [p.name for p in paths]
+        assert len(paths) == 2, names  # one absmax figure per load
+        assert not any("_plan_max" in n or "_plan_min" in n for n in names), names
+
+    # 3. Only Min -> only step-split Min files.
+    with tempfile.TemporaryDirectory() as td:
+        paths = service.save_batch_plots(
+            result, GuiSettings(batch_plot_dir=td, dpi=100, plot_steps=["min"]))
+        names = [p.name for p in paths]
+        assert len(paths) == 1 and "_plan_min.png" in names[0], names
+
+    # 4. Empty selection -> clear ValueError, before any file is written.
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            service.save_batch_plots(
+                result, GuiSettings(batch_plot_dir=td, dpi=100, plot_steps=[]))
+            raise AssertionError("expected ValueError")
+        except ValueError as exc:
+            assert "No plot steps selected" in str(exc), str(exc)
+        assert not list(Path(td).iterdir()), "files written despite empty steps"
+    print("service.save_batch_plots steps selection OK")
+
+
 def run():
     test_gui_imports_without_display()
     test_build_figure_fixed_size()
@@ -843,6 +886,7 @@ def run():
     test_plot_steps_invalid_variant_raises()
     test_build_figure_step_filter()
     test_save_batch_plots()
+    test_save_batch_plots_steps_selection()
     test_write_base_step_csv()
     test_service_frame_mode_kwargs()
     test_service_extract_kwargs_mapping()

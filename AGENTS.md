@@ -507,10 +507,15 @@ re-appliable:
   an empty step selection falls back to abs-max with a log note ("No Max
   steps for `<load>` — showing abs max").  The **Batch save plots...** button
   calls `service.save_batch_plots(result, settings)` via the background
-  runner: it writes all three variants for **every load of the current
-  result** into the sidebar's **Batch plot dir** (`GuiSettings.batch_plot_dir`;
+  runner: it writes the step variants ticked in the sidebar's **Batch steps**
+  checkboxes (Abs max / Max / Min — `GuiSettings.plot_steps`, a subset of
+  `plots.STEP_VARIANTS` in that order, all three ticked by default) for
+  **every load of the current result** into the sidebar's **Batch plot dir**
+  (`GuiSettings.batch_plot_dir`;
   blank → Output dir for an extraction result, Plot output dir / CSV parent
-  for a CSV-loaded result) and logs "Saved N plot(s) to `<dir>`".
+  for a CSV-loaded result) and logs "Saved N plot(s) to `<dir>`.".  Unticking
+  all three → the job fails with "No plot steps selected — tick at least one
+  of Abs max / Max / Min." (checked before the directory resolution).
 
 **Preview Refresh + auto-render (`gui/widgets/preview.py`):**
 

@@ -99,7 +99,10 @@ In the window:
   above the entry+Browse row rather than packing all three side by side), a
   **Batch plot dir** (target for the preview's **Batch save plots** button;
   blank falls back to the Output dir for an extraction result, or the Plot
-  output / CSV folder for a CSV-loaded result), a **Tag** field (filename
+  output / CSV folder for a CSV-loaded result) with a **Batch steps** row of
+  three checkboxes — **Abs max / Max / Min**, all ticked by default — choosing
+  which step variants the batch save writes (untick all three → the batch job
+  fails with a clear log error), a **Tag** field (filename
   suffix, sanitized, with a live "Suffix: _xxx" hint), and **Attach (not
   launch)** / **Run analysis** switches.
 - **Units card** — **Force** and **Length** dropdowns selecting the output
@@ -148,9 +151,10 @@ In the window:
     **Max** / **Min** show only that envelope step, with the existing
     `(Max)`/`(Min)` title suffix), **Refresh** (re-reads the Plot settings
     tab and re-renders), **Save image...**, and **Batch save plots...**
-    (writes, for **every load of the current result**, all three step
-    variants into the **Batch plot dir** — no dialog; see the sidebar's
-    Model & output card). Stepless loads (plain cases / legacy CSVs without
+    (writes, for **every load of the current result**, the step variants
+    ticked in the sidebar's **Batch steps** checkboxes into the **Batch plot
+    dir** — no dialog; see the sidebar's Model & output card). Stepless loads
+    (plain cases / legacy CSVs without
     `step_type`) have no Max/Min rows: selecting Max/Min for one falls back
     to the abs-max view with a log note.
   - *Frame mode* (`FramePreviewPanel`): Load / Section / Step
@@ -164,7 +168,12 @@ In the window:
   (default 1.0 in each way — extra axis-limit padding so edge point labels
   render inside the axes box), dpi (default 800), label font size (default
   2.4), **units** (`data` default — the extraction's own units, unconverted;
-  plus `kN-m`/`kN-mm`/`N-mm`/`tonf-m`/`kgf-m`), format (`png`/`pdf`/`svg`).
+  plus `kN-m`/`kN-mm`/`N-mm`/`tonf-m`/`kgf-m`), format (`png`/`pdf`/`svg`);
+  **Label** component checkboxes (`Fx Fy Fz M1 M2 M3` — which reaction values
+  each point's label shows, default `Fz M2 M3`; deselect all for
+  point-number-only labels) and **Label dx/dy (pts)** entries (the label's
+  offset from its marker in points, defaults `-6`/`-18` — position only,
+  distinct from the X/Y edge padding in inches).
   Applies to the base preview and to `--plot-after-extract`/CSV plotting; the
   frame preview's "Save image..." always saves at dpi 150 (diagram, not a
   publication plan-view).
@@ -223,14 +232,34 @@ python -m etabs_extractor --plot-csv out/all_base_reactions.csv --tag KM13
 
 # Plot per envelope step: absmax (default) plus the Max/Min rows only:
 python -m etabs_extractor --plot-csv out/all_base_reactions.csv --plot-steps absmax,max,min
+
+# Label contents + position: show only Fz, shifted right of each marker:
+python -m etabs_extractor --plot-csv out/all_base_reactions.csv --components Fz --label-dx 8 --label-dy 0
 ```
 
 Each produces one `base_<load>_plan.<fmt>` (or `base_<load>_plan_<tag>.<fmt>`
 with `--tag`) figure per load name in the
 output directory (or, for `--plot-csv`, next to the CSV). Every point is
 labelled with its **point/joint number as the first line** (bare number, e.g.
-`1`), followed by its `Fz`, `M2`, `M3` values. See "Library API"
-for the components map and how to change/annotate a different set.
+`1`), followed by one line per selected component (`Fz`, `M2`, `M3` by
+default; see "Label contents and position" below).
+
+### Label contents and position (`--components`, `--label-dx`/`--label-dy`)
+
+Each point's label box is configurable in both content and placement
+(applies to `--plot` and `--plot-csv`, and to the GUI's Plot settings tab):
+
+- **`--components Fz M2 M3`** — which reaction values each label shows
+  (canonical order `Fx Fy Fz M1 M2 M3`; the label lines always render in
+  this order regardless of tick order). An empty selection renders
+  point-number-only labels.
+- **`--label-dx PTS` / `--label-dy PTS`** — the label's offset from its
+  marker, in **points** (defaults `-6` / `-18`, i.e. up-left of the marker).
+  These are *position* offsets, distinct from the X/Y **edge padding**
+  (`x_offset`/`y_offset`, in inches), which widens the axis limits so edge
+  labels stay inside the axes box.
+
+Defaults reproduce the historical rendering exactly.
 
 ### Step variants (`--plot-steps`, default `absmax`)
 
@@ -518,6 +547,8 @@ written = plot_base_reactions(
     dynamic_size=False, figsize=(12, 6),   # fixed canvas (inches)
     dpi=300, label_fontsize=5,             # save resolution + label font
     x_offset=1.0, y_offset=1.0,            # edge-label padding on the axis limits (in)
+    label_dx=-6.0, label_dy=-18.0,         # label offset from its marker (points)
+    components=("Fz", "M2", "M3"),         # which values each label shows
 )
 
 # Build a figure without saving (returns a matplotlib Figure you can embed or
@@ -601,7 +632,9 @@ filtering for dot-plotting is done downstream.
 
 - `base_<load>_plan.<fmt>` — one plan-view x-y figure per load name, each
   support annotated with its point/joint number (first label line) followed by
-  its `Fz, M2, M3` values, displayed in the units selected by `--units`
+  one line per selected component (`Fz, M2, M3` default; `--components` / the
+  GUI's Label checkboxes), offset from its marker by `label_dx`/`label_dy`
+  points (defaults `-6`/`-18`), displayed in the units selected by `--units`
   (default `model`/`data` — the extraction's own units, unconverted).
   `--plot-format` selects the extension (default `png`).
 - **Step-aware naming:** plotting a subset that holds exactly one distinct

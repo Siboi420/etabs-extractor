@@ -52,6 +52,9 @@ class GuiSettings:
     # Batch plot save target (sidebar, both modes); blank = mode fallback
     # (extraction: Output dir; CSV mode: Plot output dir, else the CSV's parent).
     batch_plot_dir: str = ""
+    # Which step variants Batch save plots writes (subset of plots.STEP_VARIANTS,
+    # in that order).  Empty = invalid (save_batch_plots raises).
+    plot_steps: list[str] = field(default_factory=lambda: ["absmax", "max", "min"])
 
     # Plot appearance
     plot_after_extract: bool = False
@@ -88,6 +91,11 @@ MODE_CHOICES: tuple[str, ...] = ("base", "frame")
 # Base-preview step variants (label shown in the dropdown -> plots.STEP_VARIANTS
 # entry via preview._STEP_VARIANT).  "Abs max" is today's max-|value| default.
 STEP_CHOICES: tuple[str, ...] = ("Abs max", "Max", "Min")
+
+# Batch-save checkbox order (label -> plots.STEP_VARIANTS entry).
+BATCH_STEP_CHOICES: tuple[tuple[str, str], ...] = (
+    ("Abs max", "absmax"), ("Max", "max"), ("Min", "min"),
+)
 
 # Accepted plot display-unit choices for the GUI dropdown ("data" displays
 # the extraction's own units unconverted; the rest are named presets from

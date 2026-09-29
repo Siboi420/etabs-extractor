@@ -247,11 +247,17 @@ def save_batch_plots(result: dict, settings: GuiSettings) -> list[Path]:
     (else the CSV's parent) for a CSV-loaded result.  Returns the non-empty
     written paths.
     """
-    from etabs_extractor.plots import STEP_VARIANTS, plot_base_reactions
+    from etabs_extractor.plots import plot_base_reactions
 
     df = result.get("df")
     if df is None or len(df) == 0:
         raise ValueError("No extraction/CSV result loaded to plot.")
+
+    steps = tuple(settings.plot_steps)
+    if not steps:
+        raise ValueError(
+            "No plot steps selected — tick at least one of Abs max / Max / Min."
+        )
 
     target = (settings.batch_plot_dir or "").strip()
     if not target:
@@ -270,7 +276,7 @@ def save_batch_plots(result: dict, settings: GuiSettings) -> list[Path]:
         )
 
     paths = plot_base_reactions(
-        df, target, steps=STEP_VARIANTS, **build_plot_kwargs(settings)
+        df, target, steps=steps, **build_plot_kwargs(settings)
     )
     return [p for p in paths if str(p)]
 

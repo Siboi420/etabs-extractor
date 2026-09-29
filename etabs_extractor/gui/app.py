@@ -27,6 +27,7 @@ from etabs_extractor.gui.service import (
 )
 from etabs_extractor.gui.state import (
     APPEARANCE_CHOICES,
+    BATCH_STEP_CHOICES,
     FORCE_UNIT_CHOICES,
     LENGTH_UNIT_CHOICES,
     GuiSettings,
@@ -137,6 +138,18 @@ class EtabsExtractorApp(ctk.CTk):
             text="(blank: extraction → Output dir; CSV → Plot output / CSV folder)",
             text_color="gray", anchor="w", wraplength=280, justify="left",
         ).pack(fill="x")  # batch-save fallback target, see service.save_batch_plots
+
+        # Batch save plots: which step variants to write (all three by default).
+        batch_steps_row = ctk.CTkFrame(model_section.body, fg_color="transparent")
+        batch_steps_row.pack(fill="x", pady=(2, 0))
+        ctk.CTkLabel(batch_steps_row, text="Batch steps:", anchor="w").pack(side="left")
+        self.batch_step_vars: dict[str, ctk.BooleanVar] = {}
+        for label, variant in BATCH_STEP_CHOICES:
+            var = ctk.BooleanVar(value=variant in ("absmax", "max", "min"))
+            self.batch_step_vars[variant] = var
+            ctk.CTkCheckBox(batch_steps_row, text=label, variable=var, width=72).pack(
+                side="left", padx=(6, 0),
+            )
         self.tag_field = LabeledEntry(model_section.body, "Tag", "")
         self.tag_field.pack(fill="x", pady=3)
         self.tag_hint_var = ctk.StringVar(value="")
@@ -397,6 +410,7 @@ class EtabsExtractorApp(ctk.CTk):
         s.model_path = self.model_field.get()
         s.output_dir = self.output_field.get()
         s.batch_plot_dir = self.batch_plot_field.get()
+        s.plot_steps = [v for _, v in BATCH_STEP_CHOICES if self.batch_step_vars[v].get()]
         s.tag = self.tag_field.get()
         s.extract_mode = self.mode_var.get()
         s.selected_combos, s.selected_cases = self.load_field.get_selected()
